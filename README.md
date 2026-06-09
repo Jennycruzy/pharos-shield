@@ -34,17 +34,18 @@ from on-chain facts only.
 6. [`inspect` — control structure](#inspect--control-structure)
 7. [`autopsy` — post-failure forensics](#autopsy--post-failure-forensics)
 8. [`simulate` — pre-flight dry-run](#simulate--pre-flight-dry-run)
-9. [`probe` — capability check](#probe--capability-check)
-10. [Composable workflows](#composable-workflows)
-11. [Suggested demo (≈90 s)](#suggested-demo-90s)
-12. [Using Shield from an AI agent (MCP)](#using-shield-from-an-ai-agent-mcp)
-13. [Output reference (JSON fields)](#output-reference-json-fields)
-14. [Building calldata for `simulate`](#building-calldata-for-simulate)
-15. [Current build verification](#current-build-verification)
-16. [Verified on-chain artifacts](#verified-on-chain-artifacts)
-17. [Verified-vs-degraded status](#verified-vs-degraded-status)
-18. [Troubleshooting](#troubleshooting)
-19. [Configuration, safety policy, dependencies](#network-configuration)
+9. [Token movements & approval safety](#token-movements--approval-safety)
+10. [`probe` — capability check](#probe--capability-check)
+11. [Composable workflows](#composable-workflows)
+12. [Suggested demo (≈90 s)](#suggested-demo-90s)
+13. [Using Shield from an AI agent (MCP)](#using-shield-from-an-ai-agent-mcp)
+14. [Output reference (JSON fields)](#output-reference-json-fields)
+15. [Building calldata for `simulate`](#building-calldata-for-simulate)
+16. [Current build verification](#current-build-verification)
+17. [Verified on-chain artifacts](#verified-on-chain-artifacts)
+18. [Verified-vs-degraded status](#verified-vs-degraded-status)
+19. [Troubleshooting](#troubleshooting)
+20. [Configuration, safety policy, dependencies](#network-configuration)
 
 ---
 
@@ -389,6 +390,69 @@ Notes:
 
 ---
 
+## Token movements & approval safety
+
+Both `simulate` and `autopsy` decode **ERC-20/721 token movements and
+approvals**, with token `symbol`/`decimals` resolved live via `eth_call`. This
+is the pre-sign protection layer — and it stays **fact-based**: Shield reports
+*what moves* and *what you're approving*, never a token "risk score."
+
+Two honest sources:
+
+| Command | Source of truth | Reports |
+| --- | --- | --- |
+| `autopsy` (succeeded tx) | actual `Transfer`/`Approval` **event logs** in the receipt | what really moved |
+| `autopsy` (failed tx) | the reverted **call tree** | *attempted* movements (nothing actually moved) |
+| `simulate` | the would-be **call tree** (or your own call if it'd revert) | *intended* movements before you sign |
+
+### The headline: unlimited-approval detection
+
+Approving `max uint256` (or `setApprovalForAll`) hands a spender the ability to
+drain a token indefinitely — the most common way wallets get emptied. Shield
+flags it as a **fact**, pre-sign. Real live simulation against a mainnet token:
+
+```text
+$ npm run cli -- simulate --from 0xf84d0A92... --to 0x52C48d42...(WPROS) \
+    --data 0x095ea7b3<spender>ffffffff…ffff   # approve(spender, MAX)
+Outcome:   would succeed
+Approvals (intended):
+  owner 0xf84d0A92... grants 0xBF105f4f...: UNLIMITED (max uint256) [WPROS]  ⚠ UNLIMITED
+Notes:
+  - Approval grants 0xBF105f4f... an UNLIMITED allowance on WPROS.
+```
+
+`isUnlimited` (exact `max uint256`), `isVeryLarge` (≥ 2²⁵⁵), and `operatorAll`
+(`setApprovalForAll`) are all surfaced in the JSON for programmatic gating.
+
+### Real movements from a succeeded swap
+
+`autopsy` on a real successful tx decodes every `Transfer` with symbols and
+decimals applied:
+
+```text
+$ npm run cli -- autopsy 0xeae13982de30f5386625446d0c15218d5889c004391ff012afd33be7d4080c79
+Status:    success
+Token movements:
+  0xBE47a90c... -> 0x4fD44181...: 2.5 USDC [USDC]
+  0x912c9aDe... -> 0xA5cA5Fbe...: 4.215035862018449767 WPROS [WPROS]
+  0x4fD44181... -> 0x912c9aDe...: 2.5 USDC [USDC]
+  0xA5cA5Fbe... -> 0x903cF528...: 0.006322553793027674 WPROS [WPROS]
+Notes:
+  - Token activity (from event logs): 4 transfer(s), 0 approval(s).
+```
+
+### Honest scope
+
+- Amounts use real on-chain `decimals()`/`symbol()`; if a token doesn't answer,
+  the raw base-unit amount is shown and labeled `decimals unknown` — never faked.
+- `transferFrom` shares one selector across ERC-20 and ERC-721 (identical
+  signature), so its value is reported without asserting amount-vs-tokenId.
+- For a **failed** tx, movements are clearly labeled **ATTEMPTED** — nothing
+  moved, because it reverted.
+- This is movement/approval *accounting*, not honeypot/tax detection. No scoring.
+
+---
+
 ## `probe` — capability check
 
 Reports the active network, RPC URL, and a **live** check of whether the
@@ -541,6 +605,7 @@ Use `--json` for these shapes (text mode is a formatted view of the same data).
 | `revert.kind` | `Error` \| `Panic` \| `custom` \| `empty` \| `raw` | revert encoding |
 | `revert.reason` | string | decoded reason or faithful description |
 | `revert.selector` | string? | 4-byte selector of the revert payload |
+| `tokens` | object? | `{ transfers[], approvals[], notes[] }` (see below) |
 | `probableCause` | string | trace-supported cause or "cause undetermined" |
 
 ### `simulate`
@@ -552,7 +617,20 @@ Use `--json` for these shapes (text mode is a formatted view of the same data).
 | `revert` | object? | decoded revert (same shape as autopsy) |
 | `calls` | array | flattened call tree: `{ type, from, to, selector, value, errored, depth }` |
 | `nativeMovements` | array | `{ from, to, pros }` non-zero native transfers |
+| `tokens` | object | `{ transfers[], approvals[], notes[] }` (see below) |
 | `callCount` | number | frames in the tree |
+
+### `tokens` (shared by `simulate` & `autopsy`)
+
+| Field | Type | Meaning |
+| --- | --- | --- |
+| `transfers[]` | array | `{ token, symbol?, standard, from, to, amount, source }` |
+| `approvals[]` | array | `{ token, symbol?, standard, owner, spender, amount, isUnlimited, isVeryLarge, operatorAll, source }` |
+| `notes[]` | string[] | factual flags (e.g. "grants … an UNLIMITED allowance on WPROS") |
+
+`source` is `"log"` (real event, succeeded tx) or `"call"` (decoded from a call
+tree — intended/attempted). `amount` is decimals-formatted with `symbol` when
+the token answers, else raw base units labeled `decimals unknown`.
 
 ---
 
@@ -617,7 +695,8 @@ each one proves:
 | --- | --- | --- |
 | `0xdeeb262f…cf0de3ff` | 9,740,066 | failed tx; decoded `Error(string)` = `"BC"` |
 | `0x3697e904…e11cd22b` | 9,740,065 | failed tx; non-standard revert → "cause undetermined" |
-| `0xeae13982…d4080c79` | 9,739,680 | **successful** tx → autopsy reports "did not fail" |
+| `0xeae13982…d4080c79` | 9,739,680 | **successful** swap → 4 real ERC-20 `Transfer`s decoded (USDC/WPROS) |
+| `0x9ff066f3…dccf2264` | 9,742,305 | real `approve()` tx → `Approval` event decoded (revoke, amount 0) |
 
 **Addresses (for `inspect`):**
 
@@ -720,6 +799,7 @@ pharos-shield-skill/
     │   ├── rpc.ts        # provider + live trace-capability probe + typed errors
     │   ├── trace.ts      # callTracer core (traceCall / traceTransaction)
     │   ├── decode.ts     # revert + calldata decoding (Error/Panic/custom)
+    │   ├── tokens.ts     # ERC-20/721 movement & approval decoding (+ unlimited flag)
     │   ├── simulate.ts   # PRE-FLIGHT
     │   ├── autopsy.ts    # POST-FAILURE
     │   ├── inspect.ts    # CONTROL STRUCTURE

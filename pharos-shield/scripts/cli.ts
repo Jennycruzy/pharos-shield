@@ -175,6 +175,22 @@ function formatAutopsy(r: ReturnType<typeof autopsy> extends Promise<infer T> ? 
   }
   if (r.revert) lines.push(`Revert:    ${r.revert.reason}`);
   lines.push(`Cause:     ${r.probableCause}`);
+  if (r.tokens && (r.tokens.transfers.length > 0 || r.tokens.approvals.length > 0)) {
+    const moved = r.status === 'success' ? 'Token movements' : 'Token movements (ATTEMPTED — reverted)';
+    if (r.tokens.transfers.length > 0) {
+      lines.push(`${moved}:`);
+      for (const t of r.tokens.transfers) {
+        lines.push(`  ${t.from} -> ${t.to}: ${t.amount} [${t.symbol ?? t.token}]`);
+      }
+    }
+    if (r.tokens.approvals.length > 0) {
+      lines.push('Approvals:');
+      for (const a of r.tokens.approvals) {
+        const flag = a.isUnlimited || a.operatorAll ? '  ⚠ UNLIMITED' : a.isVeryLarge ? '  ⚠ very large' : '';
+        lines.push(`  owner ${a.owner} grants ${a.spender}: ${a.amount} [${a.symbol ?? a.token}]${flag}`);
+      }
+    }
+  }
   if (r.notes.length) {
     lines.push('Notes:');
     for (const n of r.notes) lines.push(`  - ${n}`);

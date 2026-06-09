@@ -7,11 +7,16 @@ facts — never a SAFE/UNSAFE verdict. Not a token rug/honeypot scanner.
 ## Commands
 
 - `simulate` — pre-flight a tx via `debug_traceCall`; reports revert/no-revert,
-  call tree, native PROS movements. Never sends a transaction.
+  call tree, native PROS movements, and ERC-20/721 token movements + approvals
+  (flags UNLIMITED approvals before signing). Never sends a transaction.
 - `autopsy <txhash>` — diagnose a failed tx via `debug_traceTransaction`
-  (callTracer): deepest reverting call + decoded revert + probable cause.
+  (callTracer): deepest reverting call + decoded revert + probable cause, plus
+  real (succeeded) or attempted (failed) token movements from logs/trace.
 - `inspect <address>` — contract vs EOA, EIP-1967 proxy/impl/admin, upgrade
   authority inferred from storage only.
+
+Token reporting is fact-based movement/approval accounting (symbols/decimals via
+`eth_call`), NOT a token risk score or honeypot scanner.
 
 ## Invoke (CLI)
 

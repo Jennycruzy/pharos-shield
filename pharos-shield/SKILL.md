@@ -3,14 +3,17 @@ name: pharos-shield
 description: >-
   Transaction & contract integrity layer for Pharos mainnet (chain 1672). Use
   when a user wants to (a) SIMULATE / dry-run / pre-flight a Pharos transaction
-  before signing to see if it will revert and what it will move; (b) AUTOPSY /
-  debug / diagnose why a Pharos transaction FAILED or reverted, given its tx
-  hash; or (c) INSPECT a Pharos address to tell whether it is a contract or EOA,
-  whether it is a proxy (EIP-1967), and its implementation/admin/upgrade
-  authority. Triggers include "will this tx work", "why did my tx fail/revert",
-  "simulate this call", "is this address a proxy", "who can upgrade this
-  contract", "what does this transaction do". Reports only on-chain-verified
-  facts; never a SAFE/UNSAFE verdict. NOT a token rug/honeypot scanner.
+  before signing to see if it will revert, what tokens move, and whether it
+  grants an UNLIMITED approval; (b) AUTOPSY / debug / diagnose why a Pharos
+  transaction FAILED or reverted (and what token movements it made or attempted),
+  given its tx hash; or (c) INSPECT a Pharos address to tell whether it is a
+  contract or EOA, whether it is a proxy (EIP-1967), and its
+  implementation/admin/upgrade authority. Triggers include "will this tx work",
+  "why did my tx fail/revert", "simulate this call", "what tokens does this move",
+  "is this an unlimited approval", "is this address a proxy", "who can upgrade
+  this contract", "what does this transaction do". Reports only on-chain-verified
+  facts (decoded reverts, real token transfers/approvals, proxy slots); never a
+  SAFE/UNSAFE verdict or token risk score. NOT a token rug/honeypot scanner.
 ---
 
 # Pharos Shield
@@ -38,13 +41,18 @@ Invoke this skill when the user asks to:
 ## How it works (honest scope)
 
 - **simulate** runs `debug_traceCall` at the latest block and reports whether the
-  call would revert (with the decoded reason), the would-be call tree, and
-  native PROS movements. It **never sends a transaction**.
-- **autopsy** pulls the tx + receipt; if it succeeded it says so. For a failure
-  it traces with `callTracer`, finds the deepest reverting call, decodes the
-  revert (`Error(string)` / `Panic(uint256)` / custom selector), and gives a
-  trace-supported probable cause — or "cause undetermined" when the data does
-  not support a confident answer.
+  call would revert (with the decoded reason), the would-be call tree, native
+  PROS movements, and **ERC-20/721 token movements + approvals** — flagging
+  **UNLIMITED** approvals (`max uint256` / `setApprovalForAll`) before you sign.
+  It **never sends a transaction**.
+- **autopsy** pulls the tx + receipt; if it succeeded it says so (and decodes the
+  real `Transfer`/`Approval` events that occurred). For a failure it traces with
+  `callTracer`, finds the deepest reverting call, decodes the revert
+  (`Error(string)` / `Panic(uint256)` / custom selector), reports the *attempted*
+  token movements, and gives a trace-supported probable cause — or "cause
+  undetermined" when the data does not support a confident answer.
+- Token reporting is **movement/approval accounting, not a risk score** — symbols
+  and decimals are resolved live via `eth_call`; unknown stays unknown.
 - **inspect** uses `eth_getCode` to classify contract vs EOA and reads the three
   EIP-1967 storage slots (+ legacy OZ slot). It reports only what storage
   proves; it does **not** claim "verified source" (Pharos's explorer exposes no

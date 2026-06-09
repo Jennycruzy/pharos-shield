@@ -17,9 +17,20 @@ import {
   traceTransaction,
   deepestErroredFrame,
   countCalls,
+  flatten,
   type CallFrame,
 } from './trace.js';
 import { decodeRevert, labelSelector, type DecodedRevert } from './decode.js';
+import {
+  decodeTokenLogs,
+  decodeTokenCalls,
+  enrichTokenMeta,
+  buildTokenReport,
+  tokenAddressesOf,
+  type DecodedTokens,
+  type TokenReport,
+  type LogLike,
+} from './tokens.js';
 
 export interface FailingCall {
   from: string;
@@ -44,6 +55,12 @@ export interface AutopsyResult {
   callCount?: number;
   failingCall?: FailingCall;
   revert?: DecodedRevert;
+  /**
+   * Token movements & approvals. For a SUCCEEDED tx these are the real events
+   * that occurred (decoded from receipt logs). For a FAILED tx nothing moved —
+   * these are the *attempted* movements decoded from the trace, labeled so.
+   */
+  tokens?: TokenReport;
   /** Honest, trace-supported cause hypothesis or an explicit "undetermined". */
   probableCause: string;
   notes: string[];
@@ -162,6 +179,20 @@ export async function autopsy(
   if (receipt.status === 1) {
     base.probableCause = 'transaction did NOT fail — it succeeded on chain.';
     notes.push('Receipt status = 1 (success). Nothing to diagnose.');
+    // Real token movements: decode the receipt's emitted events.
+    const logs: LogLike[] = receipt.logs.map((l) => ({
+      address: l.address,
+      topics: l.topics,
+      data: l.data,
+    }));
+    const tokens = await reportTokens(client, decodeTokenLogs(logs));
+    base.tokens = tokens;
+    if (tokens.transfers.length > 0 || tokens.approvals.length > 0) {
+      notes.push(
+        `Token activity (from event logs): ${tokens.transfers.length} transfer(s), ${tokens.approvals.length} approval(s).`,
+      );
+      notes.push(...tokens.notes);
+    }
     return base;
   }
 
@@ -183,6 +214,18 @@ export async function autopsy(
 
   base.traced = true;
   base.callCount = countCalls(root);
+
+  // Attempted token movements/approvals decoded from the (reverted) call tree.
+  const attemptedFrames = flatten(root).map((f) => f.frame);
+  const attemptedTokens = await reportTokens(client, decodeTokenCalls(attemptedFrames));
+  base.tokens = attemptedTokens;
+  if (attemptedTokens.transfers.length > 0 || attemptedTokens.approvals.length > 0) {
+    notes.push(
+      `ATTEMPTED token activity (tx reverted, so nothing actually moved): ` +
+        `${attemptedTokens.transfers.length} transfer(s), ${attemptedTokens.approvals.length} approval(s).`,
+    );
+  }
+
   const deepest = deepestErroredFrame(root);
 
   if (!deepest) {
@@ -207,6 +250,15 @@ export async function autopsy(
       `[${failing.selector}]${failing.error ? ' error=' + failing.error : ''}.`,
   );
   return base;
+}
+
+/** Enrich decoded tokens with on-chain metadata and build a serializable report. */
+async function reportTokens(
+  client: ShieldClient,
+  decoded: DecodedTokens,
+): Promise<TokenReport> {
+  const meta = await enrichTokenMeta(client, tokenAddressesOf(decoded));
+  return buildTokenReport(decoded, meta);
 }
 
 /**

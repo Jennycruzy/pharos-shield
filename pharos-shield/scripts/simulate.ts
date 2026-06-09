@@ -28,6 +28,13 @@ import {
   type DecodedRevert,
   type ValueTransfer,
 } from './decode.js';
+import {
+  decodeTokenCalls,
+  enrichTokenMeta,
+  buildTokenReport,
+  tokenAddressesOf,
+  type TokenReport,
+} from './tokens.js';
 
 export interface SimulateParams {
   from: string;
@@ -59,6 +66,8 @@ export interface SimulateResult {
   revert?: DecodedRevert;
   calls: SimCall[];
   nativeMovements: Array<{ from: string; to: string; pros: string }>;
+  /** Intended ERC-20/721 movements & approvals decoded from the call tree. */
+  tokens: TokenReport;
   notes: string[];
 }
 
@@ -132,6 +141,15 @@ export async function simulate(
   } catch (err) {
     if (err instanceof RpcError && isRevertError(err)) {
       const revert = decodeRevert(err.data);
+      // Even though it would revert, decode the user's OWN intended call so an
+      // unlimited approval or transfer is still surfaced from the request.
+      const syntheticFrame: CallFrame = {
+        type: 'CALL',
+        from,
+        ...(to !== undefined ? { to } : {}),
+        input: request.data ?? '0x',
+      };
+      const tokens = await computeTokenReport(client, [syntheticFrame]);
       return {
         network: client.config.network.name,
         isSimulation: true,
@@ -142,10 +160,12 @@ export async function simulate(
         revert,
         calls: [],
         nativeMovements: [],
+        tokens,
         notes: [
           'SIMULATION ONLY — no transaction was sent. Result reflects current latest-block state.',
           `Would REVERT at the top level: ${revert.reason}.`,
           'Pharos reported the revert as an RPC error (no call tree returned for top-level reverts).',
+          ...tokens.notes,
         ],
       };
     }
@@ -189,6 +209,12 @@ export async function simulate(
     notes.push('No non-zero native (PROS) movements in the trace.');
   }
 
+  const tokens = await computeTokenReport(client, allFrames);
+  if (tokens.transfers.length === 0 && tokens.approvals.length === 0) {
+    notes.push('No ERC-20/721 token movements or approvals decoded from the call tree.');
+  }
+  notes.push(...tokens.notes);
+
   return {
     network: client.config.network.name,
     isSimulation: true,
@@ -199,8 +225,19 @@ export async function simulate(
     ...(revert ? { revert } : {}),
     calls,
     nativeMovements,
+    tokens,
     notes,
   };
+}
+
+/** Decode token calls from frames and enrich with on-chain metadata. */
+async function computeTokenReport(
+  client: ShieldClient,
+  frames: CallFrame[],
+): Promise<TokenReport> {
+  const decoded = decodeTokenCalls(frames);
+  const meta = await enrichTokenMeta(client, tokenAddressesOf(decoded));
+  return buildTokenReport(decoded, meta);
 }
 
 /** Format a SimulateResult for human-readable CLI output. */
@@ -224,6 +261,21 @@ export function formatSimulate(r: SimulateResult): string {
   if (r.nativeMovements.length > 0) {
     lines.push('Native (PROS) movements:');
     for (const m of r.nativeMovements) lines.push(`  ${m.from} -> ${m.to}: ${m.pros}`);
+  }
+  if (r.tokens.transfers.length > 0) {
+    lines.push('Token movements (intended):');
+    for (const t of r.tokens.transfers) {
+      const label = t.symbol ?? t.token;
+      lines.push(`  ${t.from} -> ${t.to}: ${t.amount} [${label}]`);
+    }
+  }
+  if (r.tokens.approvals.length > 0) {
+    lines.push('Approvals (intended):');
+    for (const a of r.tokens.approvals) {
+      const label = a.symbol ?? a.token;
+      const flag = a.isUnlimited || a.operatorAll ? '  ⚠ UNLIMITED' : a.isVeryLarge ? '  ⚠ very large' : '';
+      lines.push(`  owner ${a.owner} grants ${a.spender}: ${a.amount} [${label}]${flag}`);
+    }
   }
   lines.push('Notes:');
   for (const n of r.notes) lines.push(`  - ${n}`);
