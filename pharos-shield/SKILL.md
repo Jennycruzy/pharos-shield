@@ -66,7 +66,8 @@ npm run cli -- probe          # show network + live trace capability
 # add --json for machine-readable output; --network testnet to switch (secondary)
 ```
 
-Real verified mainnet examples and exact outputs are in `README.md`.
+Real verified mainnet examples and exact outputs are in the repository
+[`README.md`](../README.md) (repo root).
 
 ## Scripts
 

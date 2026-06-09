@@ -710,21 +710,22 @@ Environment variables (see `.env.example`):
 ## Project layout
 
 ```
-pharos-shield/
-├── SKILL.md / AGENTS.md / CLAUDE.md   # agent-discovery manifests
-├── README.md
-├── package.json / tsconfig.json / .env.example
-├── scripts/
-│   ├── config.ts     # networks, verified RPC URLs, EIP-1967 slots
-│   ├── rpc.ts        # provider + live trace-capability probe + typed errors
-│   ├── trace.ts      # callTracer core (traceCall / traceTransaction)
-│   ├── decode.ts     # revert + calldata decoding (Error/Panic/custom)
-│   ├── simulate.ts   # PRE-FLIGHT
-│   ├── autopsy.ts    # POST-FAILURE
-│   ├── inspect.ts    # CONTROL STRUCTURE
-│   └── cli.ts        # simulate | autopsy | inspect | probe
-└── mcp/
-    └── server.ts     # same core as MCP tools (stdio + HTTP)
+pharos-shield-skill/
+├── README.md                          # this file (repo landing page)
+└── pharos-shield/                     # the skill payload
+    ├── SKILL.md / AGENTS.md / CLAUDE.md   # agent-discovery manifests
+    ├── package.json / tsconfig.json / .env.example
+    ├── scripts/
+    │   ├── config.ts     # networks, verified RPC URLs, EIP-1967 slots
+    │   ├── rpc.ts        # provider + live trace-capability probe + typed errors
+    │   ├── trace.ts      # callTracer core (traceCall / traceTransaction)
+    │   ├── decode.ts     # revert + calldata decoding (Error/Panic/custom)
+    │   ├── simulate.ts   # PRE-FLIGHT
+    │   ├── autopsy.ts    # POST-FAILURE
+    │   ├── inspect.ts    # CONTROL STRUCTURE
+    │   └── cli.ts        # simulate | autopsy | inspect | probe
+    └── mcp/
+        └── server.ts     # same core as MCP tools (stdio + HTTP)
 ```
 
 ## License
