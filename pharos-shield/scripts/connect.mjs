@@ -29,7 +29,7 @@ From this folder:
 Then every CLI below can use a one-word command with NO path and NO tsx.
 Once published to npm, the same works zero-clone via:
 
-  npx -y -p pharos-shield pharos-shield-mcp
+  npx -y pharos-shield-mcp
 ${h('Claude Code')}
 A project-scoped .mcp.json is committed at the repo root — open this folder
 and approve the "pharos-shield" server. To register globally (any directory):

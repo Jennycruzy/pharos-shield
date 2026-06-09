@@ -618,7 +618,7 @@ npm run setup
 npm install -g .        # or: npm link   → exposes `pharos-shield-mcp`
 ```
 
-Once published to npm, the same works zero-clone: `npx -y -p pharos-shield pharos-shield-mcp`.
+Once published to npm, the same works zero-clone: `npx -y pharos-shield-mcp`.
 
 **Claude Code** — a project-scoped `.mcp.json` is committed at the package root,
 so just open the folder and approve the `pharos-shield` server. To register it

@@ -1,5 +1,5 @@
 {
-  "name": "pharos-shield",
+  "name": "pharos-shield-mcp",
   "version": "0.1.0",
   "description": "Transaction & contract integrity layer for Pharos mainnet: simulate, autopsy, inspect. Real on-chain facts, no mocks.",
   "type": "module",
