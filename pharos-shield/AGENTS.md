@@ -12,8 +12,10 @@ facts — never a SAFE/UNSAFE verdict. Not a token rug/honeypot scanner.
 - `autopsy <txhash>` — diagnose a failed tx via `debug_traceTransaction`
   (callTracer): deepest reverting call + decoded revert + probable cause, plus
   real (succeeded) or attempted (failed) token movements from logs/trace.
-- `inspect <address>` — contract vs EOA, EIP-1967 proxy/impl/admin, upgrade
-  authority inferred from storage only.
+- `inspect <address>` — contract vs EOA, EIP-1967 proxy/impl/admin + EIP-1167
+  minimal-proxy + beacon resolution, PUSH-aware bytecode scan
+  (DELEGATECALL/SELFDESTRUCT/CREATE2), and live owner()/paused()/token-metadata/
+  ERC-165 reads. Reports only what storage proves or the chain answers.
 
 Token reporting is fact-based movement/approval accounting (symbols/decimals via
 `eth_call`), NOT a token risk score or honeypot scanner.

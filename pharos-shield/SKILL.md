@@ -10,8 +10,9 @@ description: >-
   contract or EOA, whether it is a proxy (EIP-1967), and its
   implementation/admin/upgrade authority. Triggers include "will this tx work",
   "why did my tx fail/revert", "simulate this call", "what tokens does this move",
-  "is this an unlimited approval", "is this address a proxy", "who can upgrade
-  this contract", "what does this transaction do". Reports only on-chain-verified
+  "is this an unlimited approval", "is this address a proxy", "who owns/can
+  upgrade this contract", "can this contract self-destruct", "what token is this",
+  "what does this transaction do". Reports only on-chain-verified
   facts (decoded reverts, real token transfers/approvals, proxy slots); never a
   SAFE/UNSAFE verdict or token risk score. NOT a token rug/honeypot scanner.
 ---
@@ -53,10 +54,14 @@ Invoke this skill when the user asks to:
   undetermined" when the data does not support a confident answer.
 - Token reporting is **movement/approval accounting, not a risk score** — symbols
   and decimals are resolved live via `eth_call`; unknown stays unknown.
-- **inspect** uses `eth_getCode` to classify contract vs EOA and reads the three
-  EIP-1967 storage slots (+ legacy OZ slot). It reports only what storage
-  proves; it does **not** claim "verified source" (Pharos's explorer exposes no
-  public source-verification API — confirmed at build time).
+- **inspect** uses `eth_getCode` to classify contract vs EOA, reads the three
+  EIP-1967 storage slots (+ legacy OZ slot), and adds deep control-structure
+  signals: EIP-1167 minimal-proxy detection, beacon `implementation()`
+  resolution, PUSH-aware bytecode scan (`DELEGATECALL`/`SELFDESTRUCT`/`CREATE2`),
+  and live `eth_call` reads of `owner()`/`paused()`, token name/symbol/decimals,
+  and ERC-165 interfaces — each reported only when the chain answers. It does
+  **not** claim "verified source" (Pharos's explorer exposes no public
+  source-verification API — confirmed at build time).
 
 All three share one trace/RPC core. The default mainnet RPC
 (`https://rpc.pharos.xyz`) was verified to expose the `debug_*` trace namespace

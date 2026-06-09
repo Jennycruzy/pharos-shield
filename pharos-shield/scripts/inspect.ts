@@ -14,6 +14,15 @@
 import { ethers, getAddress } from 'ethers';
 import type { ShieldClient } from './rpc.js';
 import { EIP1967_SLOTS, LEGACY_IMPL_SLOT } from './config.js';
+import { scanOpcodes, detectMinimalProxy, type OpcodeScan } from './bytecode.js';
+import {
+  readTraits,
+  readTokenInfo,
+  readInterfaces,
+  resolveBeaconImplementation,
+  type ContractTraits,
+  type TokenInfo,
+} from './traits.js';
 
 const ZERO_ADDRESS = '0x0000000000000000000000000000000000000000';
 
@@ -33,11 +42,20 @@ export type AddressKind = 'eoa' | 'contract';
 
 export interface ProxyInfo {
   isProxy: boolean;
-  /** "eip1967" | "eip1967-beacon" | "legacy-oz" | "none" */
-  standard: 'eip1967' | 'eip1967-beacon' | 'legacy-oz' | 'none';
+  /** "eip1967" | "eip1967-beacon" | "legacy-oz" | "eip1167-minimal" | "none" */
+  standard: 'eip1967' | 'eip1967-beacon' | 'legacy-oz' | 'eip1167-minimal' | 'none';
   implementation?: string;
   admin?: string;
   beacon?: string;
+  /** Implementation resolved by calling beacon.implementation() (beacon proxies). */
+  beaconImplementation?: string;
+}
+
+export interface BytecodeInfo {
+  opcodes: string[];
+  hasDelegateCall: boolean;
+  hasSelfDestruct: boolean;
+  hasCreate2: boolean;
 }
 
 export interface InspectResult {
@@ -49,6 +67,14 @@ export interface InspectResult {
   proxy: ProxyInfo;
   /** What the admin slot implies about upgrade authority (inferred, not source). */
   upgradeAuthority: string;
+  /** Static bytecode signals (PUSH-aware opcode scan). Contract only. */
+  bytecode?: BytecodeInfo;
+  /** Live owner()/paused()/implementation() reads, when the contract answers. */
+  traits?: ContractTraits;
+  /** ERC-20 token metadata, when present. */
+  token?: TokenInfo;
+  /** ERC-165 interfaces the contract declares support for. */
+  interfaces?: string[];
   notes: string[];
 }
 
@@ -89,17 +115,84 @@ export async function inspect(
   ]);
 
   const proxy = classifyProxy(implWord, adminWord, beaconWord, legacyWord, notes);
+
+  // EIP-1167 minimal proxy: detectable from bytecode shape, independent of the
+  // EIP-1967 storage slots. If the slots showed no proxy, this can still find one.
+  const minimal = detectMinimalProxy(code);
+  if (minimal.isMinimalProxy && minimal.target) {
+    proxy.isProxy = true;
+    if (proxy.standard === 'none') proxy.standard = 'eip1167-minimal';
+    if (!proxy.implementation) proxy.implementation = getAddress(minimal.target);
+    notes.push(
+      `EIP-1167 minimal proxy detected from bytecode -> delegates to ${getAddress(minimal.target)}.`,
+    );
+  }
+
+  // Resolve the real implementation behind a beacon proxy.
+  if (proxy.standard === 'eip1967-beacon' && proxy.beacon) {
+    const beaconImpl = await resolveBeaconImplementation(client, proxy.beacon);
+    if (beaconImpl) {
+      proxy.beaconImplementation = beaconImpl;
+      notes.push(`Beacon ${proxy.beacon}.implementation() = ${beaconImpl}.`);
+    } else {
+      notes.push(
+        `Beacon ${proxy.beacon} did not answer implementation(); current impl not resolvable from here.`,
+      );
+    }
+  }
+
   const upgradeAuthority = describeUpgradeAuthority(proxy);
 
-  return {
+  // Static bytecode signals (PUSH-aware).
+  const scan: OpcodeScan = scanOpcodes(code);
+  const bytecode: BytecodeInfo = {
+    opcodes: scan.found,
+    hasDelegateCall: scan.hasDelegateCall,
+    hasSelfDestruct: scan.hasSelfDestruct,
+    hasCreate2: scan.hasCreate2,
+  };
+  if (scan.hasSelfDestruct) {
+    notes.push('Bytecode contains a SELFDESTRUCT opcode (the contract can self-destruct).');
+  }
+  if (scan.hasDelegateCall && !proxy.isProxy) {
+    notes.push(
+      'Bytecode contains DELEGATECALL but no standard proxy slot was set — may be a non-standard proxy or a library-using contract.',
+    );
+  }
+
+  // Live trait / token / interface reads (each omitted unless the contract answers).
+  const [traits, token, interfaces] = await Promise.all([
+    readTraits(client, address),
+    readTokenInfo(client, address),
+    readInterfaces(client, address),
+  ]);
+  if (traits.owner) notes.push(`owner() = ${traits.owner} (live read).`);
+  if (traits.paused !== undefined) {
+    notes.push(`paused() = ${traits.paused} (live read).`);
+  }
+  if (token.symbol || token.name) {
+    notes.push(
+      `Token metadata: ${token.name ?? '?'} (${token.symbol ?? '?'}), decimals ${token.decimals ?? '?'}.`,
+    );
+  }
+  if (interfaces.length > 0) {
+    notes.push(`ERC-165 interfaces: ${interfaces.join(', ')}.`);
+  }
+
+  const result: InspectResult = {
     network: client.config.network.name,
     address,
     kind: 'contract',
     codeSize,
     proxy,
     upgradeAuthority,
+    bytecode,
     notes,
   };
+  if (Object.keys(traits).length > 0) result.traits = traits;
+  if (Object.keys(token).length > 0) result.token = token;
+  if (interfaces.length > 0) result.interfaces = interfaces;
+  return result;
 }
 
 function classifyProxy(
@@ -184,8 +277,22 @@ export function formatInspect(r: InspectResult): string {
     lines.push(`Proxy:     ${r.proxy.isProxy ? `yes (${r.proxy.standard})` : 'no'}`);
     if (r.proxy.implementation) lines.push(`Impl:      ${r.proxy.implementation}`);
     if (r.proxy.beacon) lines.push(`Beacon:    ${r.proxy.beacon}`);
+    if (r.proxy.beaconImplementation) lines.push(`Beacon impl: ${r.proxy.beaconImplementation}`);
     if (r.proxy.admin) lines.push(`Admin:     ${r.proxy.admin}`);
     lines.push(`Upgrade:   ${r.upgradeAuthority}`);
+    if (r.traits?.owner) lines.push(`Owner:     ${r.traits.owner} (live owner())`);
+    if (r.traits?.paused !== undefined) lines.push(`Paused:    ${r.traits.paused} (live paused())`);
+    if (r.token && (r.token.symbol || r.token.name)) {
+      lines.push(
+        `Token:     ${r.token.name ?? '?'} (${r.token.symbol ?? '?'}), decimals ${r.token.decimals ?? '?'}`,
+      );
+    }
+    if (r.interfaces && r.interfaces.length > 0) {
+      lines.push(`ERC-165:   ${r.interfaces.join(', ')}`);
+    }
+    if (r.bytecode && r.bytecode.opcodes.length > 0) {
+      lines.push(`Bytecode:  contains ${r.bytecode.opcodes.join(', ')}`);
+    }
   }
   lines.push('Facts:');
   for (const n of r.notes) lines.push(`  - ${n}`);

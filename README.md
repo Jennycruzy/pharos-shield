@@ -232,14 +232,54 @@ Proxy:     no
 Upgrade:   no proxy slots set — no upgrade mechanism provable from storage.
 ```
 
+### Deep control-structure reads
+
+Beyond the storage slots, `inspect` adds live and static signals — each reported
+only when the chain actually answers:
+
+- **Live trait reads (`eth_call`):** `owner()` / `getOwner()`, `paused()`, and a
+  UUPS-style `implementation()` — surfaced only on a clean decodable return.
+- **Beacon resolution:** for a beacon proxy, calls `beacon.implementation()` to
+  resolve the *real* current implementation the beacon points at.
+- **EIP-1167 minimal-proxy detection:** recognizes the 45-byte minimal-proxy
+  bytecode shape (independent of the EIP-1967 slots) and extracts its delegate
+  target.
+- **Bytecode static analysis (PUSH-aware):** reports whether the deployed code
+  contains `DELEGATECALL`, `SELFDESTRUCT`, or `CREATE2` — facts about the code,
+  not judgments. The scan skips PUSH immediates so pushed data can't masquerade
+  as an opcode.
+- **Token metadata + ERC-165:** `name`/`symbol`/`decimals`/`totalSupply` when the
+  contract is a token, and the ERC-165 interfaces it declares (after the
+  `0x01ffc9a7`/`0xffffffff` compliance handshake, so non-ERC-165 contracts aren't
+  misreported).
+
+Real example — the EIP-1967 proxy now resolves its owner and confirms the
+delegate mechanism from bytecode:
+
+```text
+$ npm run cli -- inspect 0x3c2269811836af69497e5f486a85d7316753cf62
+Proxy:     yes (eip1967)
+Impl:      0x4EE2F9B7cf3A68966c370F3eb2C16613d3235245
+Admin:     0x9740FF91F1985D8d2B71494aE1A2f723bb3Ed9E4
+Owner:     0x9F403140Bc0574D7d36eA472b82DAa1Bbd4eF327 (live owner())
+Bytecode:  contains DELEGATECALL
+
+$ npm run cli -- inspect 0x52c48d4213107b20bc583832b0d951fb9ca8f0b0
+Token:     Wrapped PROS (WPROS), decimals 18
+```
+
 ### What it can and cannot prove
 
 - **Can prove (from storage):** contract vs EOA; EIP-1967 implementation, admin,
-  and beacon slots; legacy OZ implementation slot; therefore whether it's a
-  proxy and which address the admin slot names.
+  and beacon slots; legacy OZ implementation slot; EIP-1167 minimal-proxy shape;
+  therefore whether it's a proxy and which address the admin slot names.
+- **Can read live (when the contract answers):** `owner`/`paused`, UUPS
+  `implementation`, beacon implementation, token metadata, ERC-165 interfaces,
+  and which notable opcodes the bytecode contains.
 - **Cannot prove (no public source API on Pharos):** verified source code, the
   human owner behind an admin address, or UUPS upgrade logic gated inside the
-  implementation. These are reported as **inferred**, never as verified source.
+  implementation. These are reported as **inferred/live-read**, never as verified
+  source.
 
 ---
 
@@ -586,12 +626,17 @@ Use `--json` for these shapes (text mode is a formatted view of the same data).
 | --- | --- | --- |
 | `kind` | `"contract"` \| `"eoa"` | bytecode present or not |
 | `codeSize` | number | deployed bytecode size in bytes (0 for EOA) |
-| `proxy.isProxy` | boolean | any proxy slot set |
-| `proxy.standard` | `eip1967` \| `eip1967-beacon` \| `legacy-oz` \| `none` | detected pattern |
+| `proxy.isProxy` | boolean | any proxy slot/pattern detected |
+| `proxy.standard` | `eip1967` \| `eip1967-beacon` \| `legacy-oz` \| `eip1167-minimal` \| `none` | detected pattern |
 | `proxy.implementation` | address? | current logic contract |
 | `proxy.admin` | address? | EIP-1967 admin (upgrade authority) |
 | `proxy.beacon` | address? | beacon contract (beacon proxies) |
+| `proxy.beaconImplementation` | address? | impl resolved via `beacon.implementation()` |
 | `upgradeAuthority` | string | inferred-from-storage description |
+| `bytecode` | object? | `{ opcodes[], hasDelegateCall, hasSelfDestruct, hasCreate2 }` |
+| `traits` | object? | live `{ owner?, paused?, implementation? }` |
+| `token` | object? | `{ name?, symbol?, decimals?, totalSupply? }` |
+| `interfaces` | string[]? | ERC-165 interfaces declared (e.g. `ERC-721`) |
 | `notes` | string[] | the facts behind the verdict |
 
 ### `autopsy`
@@ -702,9 +747,9 @@ each one proves:
 
 | Address | Classification | Proves |
 | --- | --- | --- |
-| `0x3c2269811836af69497E5F486A85D7316753cf62` | EIP-1967 proxy | impl `0x4EE2F9B7…`, admin `0x9740FF91…` |
+| `0x3c2269811836af69497E5F486A85D7316753cf62` | EIP-1967 proxy | impl `0x4EE2F9B7…`, admin `0x9740FF91…`, live `owner()` `0x9F40…`, bytecode `DELEGATECALL` |
 | `0x28b5a0e9C621a5BadaA536219b3a228C8168cf5d` | EIP-1967 proxy | impl `0x1CcaFdff…`, admin `0x334eaBb5…` |
-| `0x52C48d4213107b20bC583832b0d951FB9CA8F0B0` | non-proxy contract | code present, no proxy slots set |
+| `0x52C48d4213107b20bC583832b0d951FB9CA8F0B0` | non-proxy token | `Wrapped PROS (WPROS)`, decimals 18 (live reads) |
 | `0x7Ac6d25FD5E437cB7c57Aee77aC2d0A6Cb85936C` | EOA | `eth_getCode` → `0x` |
 
 > **Read-only by design.** Shield never broadcasts a transaction, so there is no
@@ -800,6 +845,8 @@ pharos-shield-skill/
     │   ├── trace.ts      # callTracer core (traceCall / traceTransaction)
     │   ├── decode.ts     # revert + calldata decoding (Error/Panic/custom)
     │   ├── tokens.ts     # ERC-20/721 movement & approval decoding (+ unlimited flag)
+    │   ├── bytecode.ts   # PUSH-aware opcode scan + EIP-1167 minimal-proxy detection
+    │   ├── traits.ts     # live owner/paused/impl, token metadata, ERC-165 reads
     │   ├── simulate.ts   # PRE-FLIGHT
     │   ├── autopsy.ts    # POST-FAILURE
     │   ├── inspect.ts    # CONTROL STRUCTURE
