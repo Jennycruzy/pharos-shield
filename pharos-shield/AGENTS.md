@@ -4,6 +4,13 @@ Transaction & contract **integrity** layer for **Pharos mainnet (chain 1672)**.
 Three composable commands sharing one trace/RPC core. Reports only on-chain
 facts — never a SAFE/UNSAFE verdict. Not a token rug/honeypot scanner.
 
+## Install (if asked to "install this skill")
+
+Run the repo's installer from the repo root, then tell the user to start a new
+session: `bash install.sh`. It runs `npm install` (builds `dist/`), registers
+the MCP server, and installs the skill. For a specific MCP client instead, run
+`npm run setup` here for ready-to-paste config.
+
 ## Commands
 
 - `simulate` — pre-flight a tx via `debug_traceCall`; reports revert/no-revert,

@@ -24,6 +24,39 @@ from on-chain facts only.
 
 ---
 
+## Install (one step — or just tell your agent)
+
+You don't need to run anything by hand. In Claude Code (or any agent CLI with a
+shell), just say:
+
+> **"Install this skill: https://github.com/Jennycruzy/pharos-shield-skill"**
+
+The agent clones the repo and runs the installer below. It then registers the
+MCP server and installs the skill, so from your next session you talk to Shield
+in plain English — no commands.
+
+**The installer** (what the agent runs; you can run it too):
+
+```bash
+git clone https://github.com/Jennycruzy/pharos-shield-skill
+cd pharos-shield-skill
+bash install.sh
+```
+
+`install.sh` is idempotent and does three things:
+1. `npm install` in `pharos-shield/` (this also compiles `dist/`).
+2. Registers the MCP server with Claude Code (user scope) — your
+   natural-language interface (`shield_inspect/autopsy/simulate/probe`).
+3. Installs the agent skill into `~/.claude/skills/pharos-shield`.
+
+Open a **new** session (MCP tools load at startup), then just ask:
+*"is `0x3c22…cf62` a proxy and who can upgrade it?"* — the agent calls the right
+tool and answers with on-chain facts. Other CLIs: `cd pharos-shield && npm run setup`
+prints ready-to-paste config. Full details in
+[Using Shield from an AI agent (MCP)](#using-shield-from-an-ai-agent-mcp).
+
+---
+
 ## Contents
 
 1. [Why Shield exists](#why-shield-exists)
