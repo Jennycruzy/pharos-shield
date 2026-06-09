@@ -2,7 +2,7 @@
   "mcpServers": {
     "pharos-shield": {
       "command": "node",
-      "args": ["--import", "tsx", "mcp/server.ts"],
+      "args": ["dist/mcp/server.js"],
       "env": {
         "PHAROS_NETWORK": "mainnet"
       }
