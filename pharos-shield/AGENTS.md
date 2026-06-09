@@ -12,6 +12,11 @@ facts — never a SAFE/UNSAFE verdict. Not a token rug/honeypot scanner.
 - `autopsy <txhash>` — diagnose a failed tx via `debug_traceTransaction`
   (callTracer): deepest reverting call + decoded revert + probable cause, plus
   real (succeeded) or attempted (failed) token movements from logs/trace.
+- Both `simulate` and `autopsy` resolve raw 4-byte function/custom-error
+  selectors via the openchain.xyz signature DB (`scripts/signatures.ts`). A
+  named custom error is applied only when its args actually decode against the
+  payload (no coincidental-collision mislabels). Sourcify is not used — it does
+  not index chain 1672 (verified), so no verified ABI is ever claimed.
 - `inspect <address>` — contract vs EOA, EIP-1967 proxy/impl/admin + EIP-1167
   minimal-proxy + beacon resolution, PUSH-aware bytecode scan
   (DELEGATECALL/SELFDESTRUCT/CREATE2), and live owner()/paused()/token-metadata/

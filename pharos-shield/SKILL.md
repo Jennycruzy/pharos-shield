@@ -52,6 +52,14 @@ Invoke this skill when the user asks to:
   (`Error(string)` / `Panic(uint256)` / custom selector), reports the *attempted*
   token movements, and gives a trace-supported probable cause — or "cause
   undetermined" when the data does not support a confident answer.
+- **Signature resolution** — `simulate` and `autopsy` resolve raw 4-byte
+  function and custom-error selectors against the **openchain.xyz** signature
+  database (selectors are chain-agnostic, so this works on Pharos). A named
+  custom error is applied **only when its arguments actually decode** against
+  the revert payload, so a coincidental selector collision (e.g. the degenerate
+  `0x00000000`) never mislabels a revert. Sourcify is intentionally not used —
+  it does not index chain 1672 (verified at build time), so no verified ABI is
+  ever claimed.
 - Token reporting is **movement/approval accounting, not a risk score** — symbols
   and decimals are resolved live via `eth_call`; unknown stays unknown.
 - **inspect** uses `eth_getCode` to classify contract vs EOA, reads the three
@@ -88,6 +96,7 @@ Real verified mainnet examples and exact outputs are in the repository
 - `scripts/rpc.ts` — provider + live trace-capability probe + typed errors
 - `scripts/trace.ts` — callTracer core (`debug_traceCall` / `debug_traceTransaction`)
 - `scripts/decode.ts` — revert + calldata decoding (Error/Panic/custom)
+- `scripts/signatures.ts` — openchain signature-DB lookup + decode-confirmed naming
 - `scripts/simulate.ts`, `scripts/autopsy.ts`, `scripts/inspect.ts` — the commands
 - `scripts/cli.ts` — CLI entrypoint
 - `mcp/server.ts` — same core exposed as MCP tools (stdio + HTTP)

@@ -31,6 +31,11 @@ import {
   type TokenReport,
   type LogLike,
 } from './tokens.js';
+import {
+  resolveSignature,
+  decodeWithSignature,
+  formatDecoded,
+} from './signatures.js';
 
 export interface FailingCall {
   from: string;
@@ -112,7 +117,28 @@ function inferCause(
   }
 
   if (revert.kind === 'custom') {
-    return `custom error ${revert.selector} — undecodable without the contract ABI; cause undetermined`;
+    // If the signature DB resolved the error name, map the well-known ones.
+    if (revert.signature) {
+      const sig = revert.signature.toLowerCase();
+      if (/insufficientallowance|erc20insufficientallowance/.test(sig)) {
+        return `ERC20 allowance insufficient — ${revert.reason}`;
+      }
+      if (/insufficientbalance|erc20insufficientbalance|insufficient.*funds/.test(sig)) {
+        return `insufficient token balance — ${revert.reason}`;
+      }
+      if (/(slippage|insufficientoutput|minamount|tooltittle|excessiveinput)/.test(sig)) {
+        return `slippage / output-amount check failed — ${revert.reason}`;
+      }
+      if (/(paused|enforcedpause|notauthorized|unauthorized|ownable|accesscontrol)/.test(sig)) {
+        return `access control / paused — ${revert.reason}`;
+      }
+      if (/(expired|deadline)/.test(sig)) {
+        return `deadline expired — ${revert.reason}`;
+      }
+      // Named but unmapped — the decoded error itself IS the cause, stated plainly.
+      return `reverted with ${revert.reason}`;
+    }
+    return `custom error ${revert.selector} — not in the signature database; cause undetermined without the contract ABI`;
   }
 
   if (revert.kind === 'empty') {
@@ -207,7 +233,10 @@ export async function autopsy(
     );
     // Best-effort: re-run the call at the failing block to recover revert data.
     const revert = await recoverRevertViaCall(client, tx, receipt.blockNumber);
-    if (revert) base.revert = revert;
+    if (revert) {
+      await enrichRevertSignature(revert);
+      base.revert = revert;
+    }
     base.probableCause = inferCause(revert, undefined);
     return base;
   }
@@ -234,6 +263,7 @@ export async function autopsy(
         'The revert may be at the top level; inspecting root output.',
     );
     const revert = decodeRevert(root.output);
+    await enrichRevertSignature(revert);
     base.revert = revert;
     base.failingCall = toFailingCall(root, []);
     base.probableCause = inferCause(revert, base.failingCall);
@@ -242,6 +272,9 @@ export async function autopsy(
 
   const failing = toFailingCall(deepest.frame, deepest.path);
   const revert = decodeRevert(deepest.frame.output);
+  await enrichRevertSignature(revert);
+  // Resolve the failing call's own selector to a function name when possible.
+  await enrichFailingSelector(failing);
   base.failingCall = failing;
   base.revert = revert;
   base.probableCause = inferCause(revert, failing);
@@ -250,6 +283,32 @@ export async function autopsy(
       `[${failing.selector}]${failing.error ? ' error=' + failing.error : ''}.`,
   );
   return base;
+}
+
+/** Resolve a failing call's raw selector to a function name when possible. */
+async function enrichFailingSelector(failing: FailingCall): Promise<void> {
+  if (!/^0x[0-9a-f]{8}$/.test(failing.selector)) return; // already labeled
+  const sig = await resolveSignature(failing.selector);
+  if (sig) failing.selector = sig;
+}
+
+/**
+ * Enrich a custom-error revert by resolving its 4-byte selector against the
+ * signature database (openchain). Mutates the revert in place: on a hit it sets
+ * `signature`/`args` and rewrites `reason` to the named, arg-decoded error.
+ * On a miss it leaves the honest raw-selector reason untouched.
+ */
+async function enrichRevertSignature(revert: DecodedRevert): Promise<void> {
+  if (revert.kind !== 'custom' || !revert.selector) return;
+  const sig = await resolveSignature(revert.selector);
+  if (!sig) return;
+  // Only apply the name if the payload actually decodes against it — a bare
+  // selector match (e.g. the degenerate 0x00000000) can be coincidental.
+  const decoded = decodeWithSignature(sig, revert.raw);
+  if (!decoded) return; // keep the honest raw-selector reason
+  revert.signature = sig;
+  revert.args = decoded.args;
+  revert.reason = `custom error ${formatDecoded(decoded)}`;
 }
 
 /** Enrich decoded tokens with on-chain metadata and build a serializable report. */

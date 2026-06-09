@@ -35,6 +35,12 @@ import {
   tokenAddressesOf,
   type TokenReport,
 } from './tokens.js';
+import {
+  resolveSignatures,
+  resolveSignature,
+  decodeWithSignature,
+  formatDecoded,
+} from './signatures.js';
 
 export interface SimulateParams {
   from: string;
@@ -141,6 +147,7 @@ export async function simulate(
   } catch (err) {
     if (err instanceof RpcError && isRevertError(err)) {
       const revert = decodeRevert(err.data);
+      await enrichSimRevert(revert);
       // Even though it would revert, decode the user's OWN intended call so an
       // unlimited approval or transfer is still surfaced from the request.
       const syntheticFrame: CallFrame = {
@@ -182,6 +189,8 @@ export async function simulate(
     errored: isErrored(frame),
     depth,
   }));
+  // Resolve unknown selectors in the call tree to function names (batched).
+  await relabelCalls(calls);
 
   const willRevert = isErrored(root);
   const notes: string[] = [
@@ -191,6 +200,7 @@ export async function simulate(
   let revert: DecodedRevert | undefined;
   if (willRevert) {
     revert = decodeRevert(root.output);
+    await enrichSimRevert(revert);
     notes.push(
       `Would REVERT: ${revert.reason}${root.error ? ` (node error: ${root.error})` : ''}.`,
     );
@@ -228,6 +238,33 @@ export async function simulate(
     tokens,
     notes,
   };
+}
+
+/** Resolve raw 4-byte selectors in a SimCall list to function names (batched). */
+async function relabelCalls(calls: SimCall[]): Promise<void> {
+  const unknown = calls
+    .map((c) => c.selector)
+    .filter((s) => /^0x[0-9a-f]{8}$/.test(s));
+  if (unknown.length === 0) return;
+  const resolved = await resolveSignatures(unknown);
+  for (const c of calls) {
+    const name = resolved.get(c.selector.toLowerCase());
+    if (name) c.selector = name;
+  }
+}
+
+/** Enrich a custom-error simulate revert with its resolved signature + args. */
+async function enrichSimRevert(revert: DecodedRevert): Promise<void> {
+  if (revert.kind !== 'custom' || !revert.selector) return;
+  const sig = await resolveSignature(revert.selector);
+  if (!sig) return;
+  // Only apply the name if the payload actually decodes (avoid coincidental
+  // selector collisions); otherwise keep the honest raw-selector reason.
+  const decoded = decodeWithSignature(sig, revert.raw);
+  if (!decoded) return;
+  revert.signature = sig;
+  revert.args = decoded.args;
+  revert.reason = `custom error ${formatDecoded(decoded)}`;
 }
 
 /** Decode token calls from frames and enrich with on-chain metadata. */

@@ -56,6 +56,10 @@ export interface DecodedRevert {
   selector?: string;
   /** Raw revert data as returned by the node. */
   raw?: string;
+  /** Resolved custom-error signature (from the signature DB), when found. */
+  signature?: string;
+  /** Decoded custom-error arguments (display strings), when resolvable. */
+  args?: string[];
 }
 
 /**

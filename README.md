@@ -328,18 +328,24 @@ The contract reverted with the short `Error(string)` message `"BC"`. Shield
 reports it verbatim — it does not dress it up as a friendlier explanation it
 cannot prove.
 
-### Real example — non-standard revert payload
+### Real example — signature DB names the call, but the revert stays honest
 
 ```text
 $ npm run cli -- autopsy 0x3697e90417e7b9d4b7b5c2b32533583f9150d29853b2ff9a58db3db6e11cd22b
 Status:    failed (call-tree traced)
-Failing:   0xa4971a92... -> 0x7765b930... [0x00000000] error=execute_revert
+Failing:   0xa4971a92... -> 0x7765b930... [fulfillBasicOrder_efficient_6GL6yc(...)] error=execute_revert
 Revert:    custom error with selector 0x00000000 (no ABI available to decode its name)
-Cause:     custom error 0x00000000 — undecodable without the contract ABI; cause undetermined
+Cause:     custom error 0x00000000 — not in the signature database; cause undetermined without the contract ABI
 ```
 
-The revert data isn't a standard `Error`/`Panic` encoding, so Shield surfaces
-the raw selector and says **cause undetermined** instead of inventing a reason.
+This single output shows both halves of the signature integration working — and
+its honesty guard. The failing call's selector resolves through the openchain
+signature DB to the real function `fulfillBasicOrder_efficient_6GL6yc(...)`. The
+**revert** payload, however, is the degenerate `0x00000000` selector: it shares
+that selector with named entries, but its bytes do **not** decode against any of
+their argument types, so Shield refuses to apply a name and reports **cause
+undetermined**. A coincidental selector collision never becomes a fabricated
+error — naming is applied only when the arguments actually decode.
 
 ### Real example — a transaction that did NOT fail
 
@@ -650,6 +656,8 @@ Use `--json` for these shapes (text mode is a formatted view of the same data).
 | `revert.kind` | `Error` \| `Panic` \| `custom` \| `empty` \| `raw` | revert encoding |
 | `revert.reason` | string | decoded reason or faithful description |
 | `revert.selector` | string? | 4-byte selector of the revert payload |
+| `revert.signature` | string? | custom-error signature resolved via the signature DB (only when its args decode) |
+| `revert.args` | string[]? | decoded custom-error arguments, when resolvable |
 | `tokens` | object? | `{ transfers[], approvals[], notes[] }` (see below) |
 | `probableCause` | string | trace-supported cause or "cause undetermined" |
 
@@ -791,7 +799,7 @@ command reports that honestly rather than faking a trace.
 | `autopsy` shows `degraded: no trace available` | Trace namespace unavailable on this RPC | Use a trace-enabled RPC; receipt-level facts are still reported |
 | `simulate` errors with `from is needed` | `--from` omitted | Pharos requires a sender for `debug_traceCall`; pass `--from` |
 | `inspect` shows `kind: eoa` for a "contract" | Address has no bytecode | Verify the address; it may be a typo or an EOA |
-| Revert shows `custom error 0x…` | No ABI to decode the custom error | Expected — Shield reports the raw selector rather than guessing |
+| Revert shows `custom error 0x…` | Selector not in the signature DB, or its bytes don't decode against any candidate | Expected — Shield reports the raw selector rather than guessing a name it can't confirm |
 
 ---
 
@@ -844,6 +852,7 @@ pharos-shield-skill/
     │   ├── rpc.ts        # provider + live trace-capability probe + typed errors
     │   ├── trace.ts      # callTracer core (traceCall / traceTransaction)
     │   ├── decode.ts     # revert + calldata decoding (Error/Panic/custom)
+    │   ├── signatures.ts # openchain signature-DB lookup + decode-confirmed naming
     │   ├── tokens.ts     # ERC-20/721 movement & approval decoding (+ unlimited flag)
     │   ├── bytecode.ts   # PUSH-aware opcode scan + EIP-1167 minimal-proxy detection
     │   ├── traits.ts     # live owner/paused/impl, token metadata, ERC-165 reads
