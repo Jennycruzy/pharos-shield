@@ -1,0 +1,30 @@
+{
+  "name": "pharos-shield",
+  "version": "0.1.0",
+  "description": "Transaction & contract integrity layer for Pharos mainnet: simulate, autopsy, inspect. Real on-chain facts, no mocks.",
+  "type": "module",
+  "bin": {
+    "pharos-shield": "dist/scripts/cli.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "typecheck": "tsc --noEmit",
+    "cli": "node --import tsx scripts/cli.ts",
+    "mcp": "node --import tsx mcp/server.ts",
+    "mcp:http": "node --import tsx mcp/server.ts --http"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.4",
+    "ethers": "^6.13.4",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "license": "MIT"
+}
