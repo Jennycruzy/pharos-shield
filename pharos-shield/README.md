@@ -48,8 +48,8 @@ Or for Claude Code: `claude mcp add pharos-shield -- npx -y pharos-shield-mcp`
 builds, registers the MCP server, installs the agent skill):
 
 ```bash
-git clone https://github.com/Jennycruzy/pharos-shield-skill
-cd pharos-shield-skill
+git clone https://github.com/Jennycruzy/pharos-shield
+cd pharos-shield
 bash install.sh
 ```
 
@@ -78,6 +78,6 @@ npm run cli -- probe
   beyond optional network/RPC overrides — see `.env.example`.
 
 Full documentation, verified mainnet examples, and exact outputs are in the
-[repository README](https://github.com/Jennycruzy/pharos-shield-skill#readme).
+[repository README](https://github.com/Jennycruzy/pharos-shield#readme).
 
 MIT

@@ -29,7 +29,7 @@ from on-chain facts only.
 You don't need to run anything by hand. In Claude Code (or any agent CLI with a
 shell), just say:
 
-> **"Install this skill: https://github.com/Jennycruzy/pharos-shield-skill"**
+> **"Install this skill: https://github.com/Jennycruzy/pharos-shield"**
 
 The agent clones the repo and runs the installer below. It then registers the
 MCP server and installs the skill, so from your next session you talk to Shield
@@ -38,8 +38,8 @@ in plain English — no commands.
 **The installer** (what the agent runs; you can run it too):
 
 ```bash
-git clone https://github.com/Jennycruzy/pharos-shield-skill
-cd pharos-shield-skill
+git clone https://github.com/Jennycruzy/pharos-shield
+cd pharos-shield
 bash install.sh
 ```
 
@@ -124,8 +124,8 @@ Map your phrasing to a command (this is also how an AI agent should route):
 ## Install & quick start
 
 ```bash
-git clone https://github.com/Jennycruzy/pharos-shield-skill
-cd pharos-shield-skill/pharos-shield
+git clone https://github.com/Jennycruzy/pharos-shield
+cd pharos-shield/pharos-shield
 npm install
 cp .env.example .env          # optional; defaults already target mainnet
 npm run cli -- probe          # confirm network + live trace capability
@@ -171,7 +171,7 @@ is no build step to ship: the CLI and MCP server run directly via `tsx`.
 skills and it will pull and register Shield:
 
 > "Install the `pharos-shield` skill from
-> `github.com/Jennycruzy/pharos-shield-skill` (path `pharos-shield/`). It adds
+> `github.com/Jennycruzy/pharos-shield` (path `pharos-shield/`). It adds
 > three commands — `simulate`, `autopsy`, `inspect` — for verifying Pharos
 > mainnet transactions and contracts."
 
@@ -179,7 +179,7 @@ skills and it will pull and register Shield:
 
 ```bash
 git clone --depth 1 --filter=blob:none --sparse \
-  https://github.com/Jennycruzy/pharos-shield-skill shield-tmp
+  https://github.com/Jennycruzy/pharos-shield shield-tmp
 cd shield-tmp
 git sparse-checkout set pharos-shield
 cp -r pharos-shield ~/.claude/skills/pharos-shield      # or ~/.codex/skills, ~/.openclaw/skills
@@ -197,9 +197,9 @@ If you'd rather attach the repo to an existing working directory without a full
 `git clone`:
 
 ```bash
-mkdir pharos-shield-skill && cd pharos-shield-skill
+mkdir pharos-shield && cd pharos-shield
 git init
-git remote add origin https://github.com/Jennycruzy/pharos-shield-skill
+git remote add origin https://github.com/Jennycruzy/pharos-shield
 git fetch --depth 1 origin main
 git checkout FETCH_HEAD
 cd pharos-shield && npm install        # only when you want to run commands
@@ -920,7 +920,7 @@ Environment variables (see `.env.example`):
 ## Project layout
 
 ```
-pharos-shield-skill/
+pharos-shield/
 ├── README.md                          # this file (repo landing page)
 └── pharos-shield/                     # the skill payload
     ├── SKILL.md / AGENTS.md / CLAUDE.md   # agent-discovery manifests
