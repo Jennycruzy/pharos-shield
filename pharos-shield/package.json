@@ -5,10 +5,19 @@
   "type": "module",
   "bin": {
     "pharos-shield": "dist/scripts/cli.js",
-    "pharos-shield-mcp": "bin/pharos-shield-mcp.mjs"
+    "pharos-shield-mcp": "dist/mcp/server.js"
   },
+  "files": [
+    "dist",
+    "scripts/connect.mjs",
+    "SKILL.md",
+    "AGENTS.md",
+    "CLAUDE.md",
+    ".env.example"
+  ],
   "scripts": {
     "build": "tsc",
+    "prepare": "npm run build",
     "typecheck": "tsc --noEmit",
     "cli": "node --import tsx scripts/cli.ts",
     "mcp": "node --import tsx mcp/server.ts",

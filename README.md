@@ -611,20 +611,28 @@ Print ready-to-paste config for your CLI (paths resolved automatically):
 npm run setup
 ```
 
+**Install the binary once**, then every CLI refers to it by name — no path, no
+`tsx`. `npm install` builds `dist/` automatically (via `prepare`):
+
+```bash
+npm install -g .        # or: npm link   → exposes `pharos-shield-mcp`
+```
+
+Once published to npm, the same works zero-clone: `npx -y -p pharos-shield pharos-shield-mcp`.
+
 **Claude Code** — a project-scoped `.mcp.json` is committed at the package root,
 so just open the folder and approve the `pharos-shield` server. To register it
 globally instead:
 
 ```bash
-claude mcp add pharos-shield -- node --import tsx /abs/path/pharos-shield/mcp/server.ts
+claude mcp add pharos-shield -- pharos-shield-mcp
 ```
 
 **Codex CLI** — add to `~/.codex/config.toml`:
 
 ```toml
 [mcp_servers.pharos-shield]
-command = "node"
-args = ["--import", "tsx", "/abs/path/pharos-shield/mcp/server.ts"]
+command = "pharos-shield-mcp"
 env = { PHAROS_NETWORK = "mainnet" }
 ```
 
@@ -634,16 +642,15 @@ env = { PHAROS_NETWORK = "mainnet" }
 {
   "mcpServers": {
     "pharos-shield": {
-      "command": "node",
-      "args": ["--import", "tsx", "/abs/path/pharos-shield/mcp/server.ts"],
+      "command": "pharos-shield-mcp",
       "env": { "PHAROS_NETWORK": "mainnet" }
     }
   }
 }
 ```
 
-After `npm link`, the launcher binary `pharos-shield-mcp` is an equivalent,
-shorter `command` (it forwards flags like `--http`).
+No global install? Use `"command": "node", "args": ["/abs/path/pharos-shield/dist/mcp/server.js"]`
+(run `npm run build` first), or the in-repo dev form with `--import tsx mcp/server.ts`.
 
 Run the server directly (for testing or HTTP transport):
 
