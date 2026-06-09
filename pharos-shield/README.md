@@ -29,17 +29,22 @@ from on-chain facts only.
 1. [Why Shield exists](#why-shield-exists)
 2. [Which command do I want?](#which-command-do-i-want)
 3. [Install & quick start](#install--quick-start)
-4. [`inspect` — control structure](#inspect--control-structure)
-5. [`autopsy` — post-failure forensics](#autopsy--post-failure-forensics)
-6. [`simulate` — pre-flight dry-run](#simulate--pre-flight-dry-run)
-7. [`probe` — capability check](#probe--capability-check)
-8. [Composable workflows](#composable-workflows)
-9. [Using Shield from an AI agent (MCP)](#using-shield-from-an-ai-agent-mcp)
-10. [Output reference (JSON fields)](#output-reference-json-fields)
-11. [Building calldata for `simulate`](#building-calldata-for-simulate)
-12. [Verified-vs-degraded status](#verified-vs-degraded-status)
-13. [Troubleshooting](#troubleshooting)
-14. [Configuration, safety policy, dependencies](#network-configuration)
+4. [Skill installation (file-only)](#skill-installation-file-only)
+5. [Workspace pull without clone](#workspace-pull-without-clone)
+6. [`inspect` — control structure](#inspect--control-structure)
+7. [`autopsy` — post-failure forensics](#autopsy--post-failure-forensics)
+8. [`simulate` — pre-flight dry-run](#simulate--pre-flight-dry-run)
+9. [`probe` — capability check](#probe--capability-check)
+10. [Composable workflows](#composable-workflows)
+11. [Suggested demo (≈90 s)](#suggested-demo-90s)
+12. [Using Shield from an AI agent (MCP)](#using-shield-from-an-ai-agent-mcp)
+13. [Output reference (JSON fields)](#output-reference-json-fields)
+14. [Building calldata for `simulate`](#building-calldata-for-simulate)
+15. [Current build verification](#current-build-verification)
+16. [Verified on-chain artifacts](#verified-on-chain-artifacts)
+17. [Verified-vs-degraded status](#verified-vs-degraded-status)
+18. [Troubleshooting](#troubleshooting)
+19. [Configuration, safety policy, dependencies](#network-configuration)
 
 ---
 
@@ -118,6 +123,53 @@ cp -r pharos-shield ~/.codex/skills/pharos-shield       # Codex
 `SKILL.md`, `AGENTS.md`, and `CLAUDE.md` ship in the directory for cross-agent
 discovery. The MCP server (below) covers agents that consume tools rather than
 skills.
+
+---
+
+## Skill installation (file-only)
+
+The skill is **file-only and small** — nine TypeScript modules (≈1,727 lines)
+plus the manifests, about **70 KB** tracked source (the 60 KB `package-lock.json`
+and `node_modules/` are runtime concerns, not part of the skill payload). There
+is no build step to ship: the CLI and MCP server run directly via `tsx`.
+
+**Natural-language prompt for an agent.** Drop this into an agent that supports
+skills and it will pull and register Shield:
+
+> "Install the `pharos-shield` skill from
+> `github.com/Jennycruzy/pharos-shield-skill` (path `pharos-shield/`). It adds
+> three commands — `simulate`, `autopsy`, `inspect` — for verifying Pharos
+> mainnet transactions and contracts."
+
+**Sparse, blobless checkout** (pulls only the skill directory, not history):
+
+```bash
+git clone --depth 1 --filter=blob:none --sparse \
+  https://github.com/Jennycruzy/pharos-shield-skill shield-tmp
+cd shield-tmp
+git sparse-checkout set pharos-shield
+cp -r pharos-shield ~/.claude/skills/pharos-shield      # or ~/.codex/skills, ~/.openclaw/skills
+```
+
+Skill **install** (the manifests + scripts) is separate from **runtime setup**
+(`npm install` inside the copied directory, needed only when you actually run a
+command). An agent can read `SKILL.md` without ever installing dependencies.
+
+---
+
+## Workspace pull without clone
+
+If you'd rather attach the repo to an existing working directory without a full
+`git clone`:
+
+```bash
+mkdir pharos-shield-skill && cd pharos-shield-skill
+git init
+git remote add origin https://github.com/Jennycruzy/pharos-shield-skill
+git fetch --depth 1 origin main
+git checkout FETCH_HEAD
+cd pharos-shield && npm install        # only when you want to run commands
+```
 
 ---
 
@@ -385,6 +437,39 @@ npm run -s cli -- inspect "$TO" --json | jq '{kind, proxy}'
 
 ---
 
+## Suggested demo (≈90 s)
+
+A four-step walkthrough that exercises all three commands against **real
+mainnet** state — no setup beyond `npm install`:
+
+```bash
+# 1. Confirm you're on mainnet and tracing is live (~5s)
+npm run cli -- probe
+#    -> Network: mainnet (chain 1672); Trace: traceCall=true traceTransaction=true
+
+# 2. Autopsy a real failed transaction — get the decoded revert (~10s)
+npm run cli -- autopsy 0xdeeb262fad28864a8e031db91e99de0bb4bd42aff936876d577adcddcf0de3ff
+#    -> Status: failed; Revert: "BC"; Cause: contract reverted with: "BC"
+
+# 3. Inspect the contract that reverted — is it a proxy? (~5s)
+npm run cli -- inspect 0x69Dc8E2d95C3281a643810FB5624b26Da8610DA4
+#    -> contract (19020 bytes); Proxy: no — fixed logic, no upgrade slots set
+
+# 4. Pre-flight a call before signing — would it revert? (~10s)
+npm run cli -- simulate \
+  --from 0x7Ac6d25FD5E437cB7c57Aee77aC2d0A6Cb85936C \
+  --to   0x52c48d4213107b20bc583832b0d951fb9ca8f0b0 \
+  --data 0x18160ddd          # totalSupply()
+#    -> Outcome: would succeed; Call tree printed
+```
+
+**The story it tells:** an agent diagnoses *why* a transaction failed (decoded
+on-chain reason), investigates the *control structure* of the contract involved,
+and *pre-flights* the next call before a single unit of gas is spent — all from
+verifiable on-chain facts, never a safety guess.
+
+---
+
 ## Using Shield from an AI agent (MCP)
 
 The same core is exposed as MCP tools so any MCP-compatible agent can call Shield
@@ -490,6 +575,62 @@ console.log(i.encodeFunctionData("transfer", [
 Common read selectors you can paste directly: `balanceOf(address)` =
 `0x70a08231` + 32-byte-padded address; `totalSupply()` = `0x18160ddd`;
 `decimals()` = `0x313ce567`.
+
+---
+
+## Current build verification
+
+Verified **2026-06-09** against live Pharos mainnet (latest block ≈ 9,741,966 at
+the time of this run), Node v24, ethers v6:
+
+```text
+$ npx tsc --noEmit
+tsc --noEmit: clean (exit 0)          # strict + exactOptionalPropertyTypes
+
+$ npx tsc && node dist/scripts/cli.js inspect 0x7Ac6d25FD5E437cB7c57Aee77aC2d0A6Cb85936C
+Kind:      eoa                        # compiled binary runs, not just type-checks
+
+$ npm run cli -- probe
+Network:  mainnet (chain 1672)
+RPC:      https://rpc.pharos.xyz
+Trace:    traceCall=true traceTransaction=true
+Note:     debug_traceCall(callTracer) responded; trace namespace is enabled.
+```
+
+MCP transports were exercised end-to-end the same day: `initialize` →
+`tools/list` (returns `shield_inspect`, `shield_autopsy`, `shield_simulate`,
+`shield_probe`) → `tools/call` returning real on-chain data, over **both** stdio
+and Streamable HTTP. `npm audit` reports 2 moderate advisories in the dev
+toolchain (transitive); no runtime-path impact.
+
+---
+
+## Verified on-chain artifacts
+
+Every example in this README resolves to a **real Pharos mainnet (chain 1672)**
+artifact. These are the exact addresses and transaction hashes used, and what
+each one proves:
+
+**Transactions (for `autopsy`):**
+
+| Tx hash | Block | Proves |
+| --- | --- | --- |
+| `0xdeeb262f…cf0de3ff` | 9,740,066 | failed tx; decoded `Error(string)` = `"BC"` |
+| `0x3697e904…e11cd22b` | 9,740,065 | failed tx; non-standard revert → "cause undetermined" |
+| `0xeae13982…d4080c79` | 9,739,680 | **successful** tx → autopsy reports "did not fail" |
+
+**Addresses (for `inspect`):**
+
+| Address | Classification | Proves |
+| --- | --- | --- |
+| `0x3c2269811836af69497E5F486A85D7316753cf62` | EIP-1967 proxy | impl `0x4EE2F9B7…`, admin `0x9740FF91…` |
+| `0x28b5a0e9C621a5BadaA536219b3a228C8168cf5d` | EIP-1967 proxy | impl `0x1CcaFdff…`, admin `0x334eaBb5…` |
+| `0x52C48d4213107b20bC583832b0d951FB9CA8F0B0` | non-proxy contract | code present, no proxy slots set |
+| `0x7Ac6d25FD5E437cB7c57Aee77aC2d0A6Cb85936C` | EOA | `eth_getCode` → `0x` |
+
+> **Read-only by design.** Shield never broadcasts a transaction, so there is no
+> "write path" to verify — `simulate` uses `debug_traceCall` and the other two
+> commands are pure reads. That is a deliberate safety property, not a gap.
 
 ---
 
