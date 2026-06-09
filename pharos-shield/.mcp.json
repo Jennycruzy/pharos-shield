@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "pharos-shield": {
+      "command": "node",
+      "args": ["--import", "tsx", "mcp/server.ts"],
+      "env": {
+        "PHAROS_NETWORK": "mainnet"
+      }
+    }
+  }
+}

@@ -4,14 +4,16 @@
   "description": "Transaction & contract integrity layer for Pharos mainnet: simulate, autopsy, inspect. Real on-chain facts, no mocks.",
   "type": "module",
   "bin": {
-    "pharos-shield": "dist/scripts/cli.js"
+    "pharos-shield": "dist/scripts/cli.js",
+    "pharos-shield-mcp": "bin/pharos-shield-mcp.mjs"
   },
   "scripts": {
     "build": "tsc",
     "typecheck": "tsc --noEmit",
     "cli": "node --import tsx scripts/cli.ts",
     "mcp": "node --import tsx mcp/server.ts",
-    "mcp:http": "node --import tsx mcp/server.ts --http"
+    "mcp:http": "node --import tsx mcp/server.ts --http",
+    "setup": "node scripts/connect.mjs"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.0.4",

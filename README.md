@@ -593,15 +593,42 @@ no logic is reimplemented.
 | `shield_simulate` | `{ from, to?, data?, value?, gas? }` | simulate result (JSON) |
 | `shield_probe` | `{}` | network + live trace capability |
 
-Run it:
+### Talk to it in plain English from any agent CLI
+
+Once connected, you don't call the tools by hand — you ask the agent in natural
+language and it routes to the right tool:
+
+| You say… | Agent calls |
+| --- | --- |
+| "is `0x3c22…cf62` a proxy, and who can upgrade it?" | `shield_inspect` |
+| "why did tx `0xdeeb…e3ff` fail?" | `shield_autopsy` |
+| "dry-run this call before I sign it" | `shield_simulate` |
+| "is the Pharos trace API live right now?" | `shield_probe` |
+
+Print ready-to-paste config for your CLI (paths resolved automatically):
 
 ```bash
-npm run mcp            # stdio transport (editors / desktop agents)
-npm run mcp:http       # Streamable HTTP on http://127.0.0.1:8731/mcp
-#   custom port:  node --import tsx mcp/server.ts --http --port 9000
+npm run setup
 ```
 
-Example stdio client config:
+**Claude Code** — a project-scoped `.mcp.json` is committed at the package root,
+so just open the folder and approve the `pharos-shield` server. To register it
+globally instead:
+
+```bash
+claude mcp add pharos-shield -- node --import tsx /abs/path/pharos-shield/mcp/server.ts
+```
+
+**Codex CLI** — add to `~/.codex/config.toml`:
+
+```toml
+[mcp_servers.pharos-shield]
+command = "node"
+args = ["--import", "tsx", "/abs/path/pharos-shield/mcp/server.ts"]
+env = { PHAROS_NETWORK = "mainnet" }
+```
+
+**Cursor / Windsurf / any MCP client** — standard `mcpServers` JSON:
 
 ```json
 {
@@ -613,6 +640,17 @@ Example stdio client config:
     }
   }
 }
+```
+
+After `npm link`, the launcher binary `pharos-shield-mcp` is an equivalent,
+shorter `command` (it forwards flags like `--http`).
+
+Run the server directly (for testing or HTTP transport):
+
+```bash
+npm run mcp            # stdio transport (editors / desktop agents)
+npm run mcp:http       # Streamable HTTP on http://127.0.0.1:8731/mcp
+#   custom port:  node --import tsx mcp/server.ts --http --port 9000
 ```
 
 Both transports were tested end-to-end against mainnet (initialize → tools/list
