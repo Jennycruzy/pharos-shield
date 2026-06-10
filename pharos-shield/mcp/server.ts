@@ -62,9 +62,15 @@ function buildServer(): McpServer {
     {
       title: 'Inspect a Pharos address',
       description:
-        'Classify an address as contract or EOA and report EIP-1967 proxy facts ' +
-        '(implementation, admin, beacon) read from on-chain storage. Pharos mainnet by default. ' +
-        'Reports only what storage proves; no source-verification claims.',
+        'Inspect a Pharos contract/address. Classifies it as contract or EOA, then reports its ' +
+        'control structure from on-chain facts: proxy detection (EIP-1967 implementation/admin/' +
+        'beacon, legacy-OZ, and EIP-1167 minimal-proxy), who holds upgrade authority, a PUSH-aware ' +
+        'bytecode scan for DELEGATECALL / SELFDESTRUCT / CREATE2, live owner()/paused() reads, token ' +
+        'name/symbol/decimals/totalSupply, and declared ERC-165 interfaces — each only when the chain ' +
+        'answers. Use for: "is this a proxy / who can upgrade it", "is this a contract or wallet", ' +
+        '"can this contract self-destruct", "who owns this contract", "what token is this". Pharos ' +
+        'mainnet by default. Reports only what storage/chain proves; never a SAFE/UNSAFE verdict or ' +
+        'verified-source claim.',
       inputSchema: {
         address: z.string().describe('0x-prefixed 20-byte address to inspect'),
       },
@@ -81,11 +87,16 @@ function buildServer(): McpServer {
   server.registerTool(
     'shield_autopsy',
     {
-      title: 'Autopsy a failed Pharos transaction',
+      title: 'Autopsy a Pharos transaction',
       description:
-        'Diagnose why a transaction failed: traces it with callTracer, finds the deepest ' +
-        'reverting call, decodes the revert reason (Error/Panic/custom), and reports a ' +
-        'trace-supported probable cause. Says so plainly if the tx actually succeeded.',
+        'Diagnose a Pharos transaction from its hash. If it failed, traces it with callTracer, finds ' +
+        'the deepest reverting call, decodes the revert reason (Error/Panic/custom selector, with ' +
+        '4-byte selectors resolved via the openchain signature DB), and reports a trace-supported ' +
+        'probable cause (allowance, insufficient balance, slippage, paused, deadline, overflow, ' +
+        'out-of-gas) or "cause undetermined". If it succeeded, says so and decodes the real ERC-20/721 ' +
+        'Transfer/Approval events from the receipt; for a failure it reports the *attempted* token ' +
+        'movements. Use for: "why did my tx fail/revert", "did this tx succeed or fail", "which inner ' +
+        'call reverted", "what tokens did this move".',
       inputSchema: {
         txhash: z.string().describe('0x-prefixed 32-byte transaction hash'),
       },
@@ -104,9 +115,13 @@ function buildServer(): McpServer {
     {
       title: 'Simulate (dry-run) a Pharos transaction',
       description:
-        'Pre-flight a call via debug_traceCall at the latest block. Reports whether it would ' +
-        'revert (with decoded reason), the would-be call tree, and native PROS movements. ' +
-        'NEVER sends a transaction.',
+        'Pre-flight / dry-run a Pharos call via debug_traceCall at the latest block, before signing. ' +
+        'Reports whether it would revert (with decoded reason), the would-be call tree, native PROS ' +
+        'movements, and the ERC-20/721 token movements + approvals it would make — flagging UNLIMITED ' +
+        'approvals (max uint256 / setApprovalForAll), the most common way wallets get drained. Use for: ' +
+        '"will this tx work / revert", "what does this transaction do / what would it move before I ' +
+        'sign", "is this an unlimited approval", "dry-run this call". NEVER sends a transaction — it is ' +
+        'read-only.',
       inputSchema: {
         from: z.string().describe('0x sender address (required by Pharos debug_traceCall)'),
         to: z.string().optional().describe('0x target address; omit for contract creation'),

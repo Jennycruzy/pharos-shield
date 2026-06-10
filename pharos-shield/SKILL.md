@@ -78,6 +78,15 @@ receipt/revert-reason level and say so.
 
 ## Running the commands
 
+Two equivalent paths — pick whichever is available:
+
+- **MCP tools (preferred for natural language).** If the `shield_inspect`,
+  `shield_autopsy`, `shield_simulate`, and `shield_probe` tools are present (the
+  MCP server is registered), just call the one that matches the user's intent —
+  no shell needed. Route by the "When to use" table above.
+- **CLI.** Otherwise run the commands from this skill's directory (after a
+  one-time `npm install`):
+
 ```bash
 # from the pharos-shield/ directory, after `npm install`
 npm run cli -- inspect  <address>
