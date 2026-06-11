@@ -9,7 +9,7 @@
  * helpers used by autopsy and simulate.
  */
 
-import type { ShieldClient } from './rpc.js';
+import type { RpcBlockReference, ShieldClient } from './rpc.js';
 
 /**
  * A node in the callTracer call tree, as returned by Pharos
@@ -64,14 +64,15 @@ export async function traceTransaction(
 }
 
 /**
- * Simulate a call at a block (default latest) WITHOUT sending a transaction.
+ * Simulate a call at a required, already-validated block hash without sending
+ * a transaction.
  * Pharos requires `from` to be present (verified: omitting it yields
  * PARAM_VERIFY_ERROR "from is needed"). Returns the root CallFrame.
  */
 export async function traceCall(
   client: ShieldClient,
   request: TraceCallRequest,
-  blockTag: string = 'latest',
+  block: string | RpcBlockReference,
 ): Promise<CallFrame> {
   if (!request.from) {
     throw new Error(
@@ -80,7 +81,7 @@ export async function traceCall(
   }
   const frame = await client.send<CallFrame | null>('debug_traceCall', [
     request,
-    blockTag,
+    block,
     CALL_TRACER_CONFIG,
   ]);
   if (frame === null || typeof frame !== 'object') {
@@ -95,6 +96,13 @@ export interface FlatFrame {
   depth: number;
   /** Index path from the root, e.g. [0, 2] = root.calls[0].calls[2]. */
   path: number[];
+}
+
+export interface PropagatedFailure {
+  /** Frames from the failed root to the deepest payload-propagating child. */
+  path: FlatFrame[];
+  /** Errored frames not selected as the transaction's propagated failure. */
+  nonPropagating: FlatFrame[];
 }
 
 /** Depth-first flatten of the call tree, preserving order. */
@@ -114,17 +122,57 @@ export function isErrored(frame: CallFrame): boolean {
   return Boolean(frame.error) || Boolean(frame.revertReason);
 }
 
+function normalizedOutput(frame: CallFrame): string | undefined {
+  const output = frame.output?.toLowerCase();
+  return output && output !== '0x' ? output : undefined;
+}
+
 /**
- * Find the DEEPEST errored call — the innermost frame that actually failed,
- * which is the true origin of a revert (parents propagate the error upward).
- * Returns undefined if nothing in the tree errored.
+ * Follow only errors propagated through an errored parent. A reverted child
+ * beneath a successful parent was caught and cannot be the transaction's root
+ * failure. When several children errored, descend only when the parent and
+ * child carry the same non-empty revert payload; otherwise stop conservatively
+ * at the parent instead of guessing.
  */
-export function deepestErroredFrame(root: CallFrame): FlatFrame | undefined {
-  const errored = flatten(root).filter((f) => isErrored(f.frame));
-  if (errored.length === 0) return undefined;
-  // Deepest first; on ties, the last one encountered (latest in execution).
-  errored.sort((a, b) => b.depth - a.depth || b.path.length - a.path.length);
-  return errored[0];
+export function propagatedFailure(root: CallFrame): PropagatedFailure | undefined {
+  if (!isErrored(root)) return undefined;
+
+  const all = flatten(root);
+  const selected: FlatFrame[] = [{ frame: root, depth: 0, path: [] }];
+  let current = selected[0]!;
+
+  while (true) {
+    const children = (current.frame.calls ?? [])
+      .map((frame, index) => ({
+        frame,
+        depth: current.depth + 1,
+        path: [...current.path, index],
+      }))
+      .filter(({ frame }) => isErrored(frame));
+    if (children.length === 0) break;
+
+    const parentOutput = normalizedOutput(current.frame);
+    const matching = parentOutput
+      ? children.filter(({ frame }) => normalizedOutput(frame) === parentOutput)
+      : [];
+    const next =
+      matching.length > 0
+        ? matching[matching.length - 1]
+        : children.length === 1 && !parentOutput
+          ? children[0]
+          : undefined;
+    if (!next) break;
+    selected.push(next);
+    current = next;
+  }
+
+  const selectedPaths = new Set(selected.map(({ path }) => path.join('.')));
+  return {
+    path: selected,
+    nonPropagating: all.filter(
+      ({ frame, path }) => isErrored(frame) && !selectedPaths.has(path.join('.')),
+    ),
+  };
 }
 
 /** Count every node in the tree (including the root). */

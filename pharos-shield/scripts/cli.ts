@@ -7,7 +7,11 @@
  */
 
 import { loadConfig } from './config.js';
-import { createClient, probeTraceSupport, RpcError } from './rpc.js';
+import {
+  createClient,
+  probeTraceSupport,
+  RpcError,
+} from './rpc.js';
 import { autopsy } from './autopsy.js';
 import { simulate, formatSimulate } from './simulate.js';
 import { inspect, formatInspect } from './inspect.js';
@@ -91,12 +95,14 @@ async function main(): Promise<number> {
         chainId: config.network.chainId,
         rpcUrl: config.rpcUrl,
         defaultRpcVerified: config.network.defaultRpcVerified,
+        block: cap.block,
         trace: cap,
       };
       emit(
         obj,
         `Network:  ${config.network.name} (chain ${config.network.chainId})\n` +
           `RPC:      ${config.rpcUrl}\n` +
+          `Block:    ${cap.block.blockNumber} (${cap.block.blockHash}) age=${cap.block.ageSeconds}s\n` +
           `Trace:    traceCall=${cap.traceCall} traceTransaction=${cap.traceTransaction}\n` +
           `Note:     ${cap.note}`,
       );
@@ -167,6 +173,7 @@ function formatAutopsy(r: ReturnType<typeof autopsy> extends Promise<infer T> ? 
   if (r.from) lines.push(`From:      ${r.from}`);
   if (r.to) lines.push(`To:        ${r.to}`);
   if (r.blockNumber !== undefined) lines.push(`Block:     ${r.blockNumber}`);
+  if (r.block) lines.push(`Block hash:${r.block.blockHash}`);
   if (r.gasUsed) lines.push(`Gas used:  ${r.gasUsed}`);
   if (r.callCount !== undefined) lines.push(`Calls:     ${r.callCount} frame(s)`);
   if (r.failingCall) {
@@ -175,8 +182,13 @@ function formatAutopsy(r: ReturnType<typeof autopsy> extends Promise<infer T> ? 
   }
   if (r.revert) lines.push(`Revert:    ${r.revert.reason}`);
   lines.push(`Cause:     ${r.probableCause}`);
-  if (r.tokens && (r.tokens.transfers.length > 0 || r.tokens.approvals.length > 0)) {
-    const moved = r.status === 'success' ? 'Token movements' : 'Token movements (ATTEMPTED — reverted)';
+  if (
+    r.tokens &&
+    (r.tokens.transfers.length > 0 ||
+      r.tokens.approvals.length > 0 ||
+      r.tokens.callIntents.length > 0)
+  ) {
+    const moved = 'Token movements (verified receipt logs)';
     if (r.tokens.transfers.length > 0) {
       lines.push(`${moved}:`);
       for (const t of r.tokens.transfers) {
@@ -189,6 +201,24 @@ function formatAutopsy(r: ReturnType<typeof autopsy> extends Promise<infer T> ? 
         const flag = a.isUnlimited || a.operatorAll ? '  ⚠ UNLIMITED' : a.isVeryLarge ? '  ⚠ very large' : '';
         lines.push(`  owner ${a.owner} grants ${a.spender}: ${a.amount} [${a.symbol ?? a.token}]${flag}`);
       }
+    }
+    if (r.tokens.callIntents.length > 0) {
+      lines.push('ERC-compatible call intents (selector-derived, not movements):');
+      for (const intent of r.tokens.callIntents) {
+        const counterparty = intent.to ?? intent.spender ?? '(n/a)';
+        const value = intent.displayAmount ?? intent.amountOrTokenId ?? '(n/a)';
+        lines.push(
+          `  ${intent.signature} target=${intent.target} counterparty=${counterparty} value=${value}`,
+        );
+      }
+    }
+  }
+  if (r.nonPropagatingErrors && r.nonPropagatingErrors.length > 0) {
+    lines.push('Non-propagating errored calls:');
+    for (const error of r.nonPropagatingErrors) {
+      lines.push(
+        `  ${error.from} -> ${error.to ?? '(create)'} [${error.selector}] path=${error.depthPath.join('.') || 'root'}`,
+      );
     }
   }
   if (r.notes.length) {

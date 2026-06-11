@@ -12,9 +12,16 @@
  */
 
 import { ethers, getAddress } from 'ethers';
-import type { ShieldClient } from './rpc.js';
+import {
+  getCodeAt,
+  getStorageAt,
+  prepareCommand,
+  type ChainSnapshot,
+  type ShieldClient,
+} from './rpc.js';
 import { EIP1967_SLOTS, LEGACY_IMPL_SLOT } from './config.js';
 import { scanOpcodes, detectMinimalProxy, type OpcodeScan } from './bytecode.js';
+import { buildControlGraph, type ControlGraph } from './control.js';
 import {
   readTraits,
   readTokenInfo,
@@ -64,6 +71,7 @@ export interface InspectResult {
   kind: AddressKind;
   /** Size of deployed bytecode in bytes (0 for EOA). */
   codeSize: number;
+  block: Pick<ChainSnapshot, 'blockNumber' | 'blockHash' | 'timestamp'>;
   proxy: ProxyInfo;
   /** What the admin slot implies about upgrade authority (inferred, not source). */
   upgradeAuthority: string;
@@ -75,6 +83,7 @@ export interface InspectResult {
   token?: TokenInfo;
   /** ERC-165 interfaces the contract declares support for. */
   interfaces?: string[];
+  controlGraph?: ControlGraph;
   notes: string[];
 }
 
@@ -90,7 +99,13 @@ export async function inspect(
   }
 
   const notes: string[] = [];
-  const code = await client.provider.getCode(address);
+  const snapshot = await prepareCommand(client);
+  const block = {
+    blockNumber: snapshot.blockNumber,
+    blockHash: snapshot.blockHash,
+    timestamp: snapshot.timestamp,
+  };
+  const code = await getCodeAt(client, address, snapshot);
   const codeSize = code === '0x' ? 0 : (code.length - 2) / 2;
 
   if (codeSize === 0) {
@@ -99,6 +114,7 @@ export async function inspect(
       address,
       kind: 'eoa',
       codeSize: 0,
+      block,
       proxy: { isProxy: false, standard: 'none' },
       upgradeAuthority:
         'not applicable — this is an externally-owned account (no code, no upgrade slots)',
@@ -108,10 +124,10 @@ export async function inspect(
 
   // Read all candidate slots concurrently.
   const [implWord, adminWord, beaconWord, legacyWord] = await Promise.all([
-    client.send<string>('eth_getStorageAt', [address, EIP1967_SLOTS.implementation, 'latest']),
-    client.send<string>('eth_getStorageAt', [address, EIP1967_SLOTS.admin, 'latest']),
-    client.send<string>('eth_getStorageAt', [address, EIP1967_SLOTS.beacon, 'latest']),
-    client.send<string>('eth_getStorageAt', [address, LEGACY_IMPL_SLOT, 'latest']),
+    getStorageAt(client, address, EIP1967_SLOTS.implementation, snapshot),
+    getStorageAt(client, address, EIP1967_SLOTS.admin, snapshot),
+    getStorageAt(client, address, EIP1967_SLOTS.beacon, snapshot),
+    getStorageAt(client, address, LEGACY_IMPL_SLOT, snapshot),
   ]);
 
   const proxy = classifyProxy(implWord, adminWord, beaconWord, legacyWord, notes);
@@ -130,7 +146,7 @@ export async function inspect(
 
   // Resolve the real implementation behind a beacon proxy.
   if (proxy.standard === 'eip1967-beacon' && proxy.beacon) {
-    const beaconImpl = await resolveBeaconImplementation(client, proxy.beacon);
+    const beaconImpl = await resolveBeaconImplementation(client, proxy.beacon, snapshot);
     if (beaconImpl) {
       proxy.beaconImplementation = beaconImpl;
       notes.push(`Beacon ${proxy.beacon}.implementation() = ${beaconImpl}.`);
@@ -152,7 +168,9 @@ export async function inspect(
     hasCreate2: scan.hasCreate2,
   };
   if (scan.hasSelfDestruct) {
-    notes.push('Bytecode contains a SELFDESTRUCT opcode (the contract can self-destruct).');
+    notes.push(
+      'Bytecode contains a SELFDESTRUCT opcode. Reachability and effective behavior are not proven by a static opcode scan.',
+    );
   }
   if (scan.hasDelegateCall && !proxy.isProxy) {
     notes.push(
@@ -162,9 +180,9 @@ export async function inspect(
 
   // Live trait / token / interface reads (each omitted unless the contract answers).
   const [traits, token, interfaces] = await Promise.all([
-    readTraits(client, address),
-    readTokenInfo(client, address),
-    readInterfaces(client, address),
+    readTraits(client, address, snapshot),
+    readTokenInfo(client, address, snapshot),
+    readInterfaces(client, address, snapshot),
   ]);
   if (traits.owner) notes.push(`owner() = ${traits.owner} (live read).`);
   if (traits.paused !== undefined) {
@@ -179,14 +197,43 @@ export async function inspect(
     notes.push(`ERC-165 interfaces: ${interfaces.join(', ')}.`);
   }
 
+  const controlGraph = await buildControlGraph(
+    client,
+    {
+      target: address,
+      ...(proxy.implementation ? { implementation: proxy.implementation } : {}),
+      ...(proxy.implementation
+        ? {
+            implementationEvidence:
+              proxy.standard === 'eip1967'
+                ? 'EIP-1967 implementation storage slot'
+                : proxy.standard === 'legacy-oz'
+                  ? 'legacy OpenZeppelin implementation storage slot'
+                  : proxy.standard === 'eip1167-minimal'
+                    ? 'EIP-1167 runtime bytecode target'
+                    : 'observed implementation reference',
+          }
+        : {}),
+      ...(proxy.admin ? { admin: proxy.admin } : {}),
+      ...(proxy.beacon ? { beacon: proxy.beacon } : {}),
+      ...(proxy.beaconImplementation
+        ? { beaconImplementation: proxy.beaconImplementation }
+        : {}),
+    },
+    snapshot,
+  );
+  notes.push(...controlGraph.notes);
+
   const result: InspectResult = {
     network: client.config.network.name,
     address,
     kind: 'contract',
     codeSize,
+    block,
     proxy,
     upgradeAuthority,
     bytecode,
+    controlGraph,
     notes,
   };
   if (Object.keys(traits).length > 0) result.traits = traits;
@@ -219,7 +266,10 @@ function classifyProxy(
       `EIP-1967 implementation slot is non-zero -> proxy. Implementation = ${implementation}.`,
     );
     if (hasAdmin) {
-      notes.push(`EIP-1967 admin slot = ${info.admin} (controls upgrades).`);
+      notes.push(`EIP-1967 admin slot = ${info.admin}.`);
+      notes.push(
+        'The admin slot identifies an administrative endpoint; source-level authorization and callable upgrade paths are not proven by the slot alone.',
+      );
     } else {
       notes.push(
         'EIP-1967 admin slot is zero: upgrades may be governed by the implementation logic ' +
@@ -257,13 +307,13 @@ function classifyProxy(
 
 function describeUpgradeAuthority(proxy: ProxyInfo): string {
   if (!proxy.isProxy) {
-    return 'no proxy slots set — no upgrade mechanism provable from storage. Logic at this address is fixed unless it self-destructs or uses a non-standard pattern.';
+    return 'no standard proxy slots set — no upgrade mechanism is provable from these storage checks. Non-standard control paths remain possible.';
   }
   if (proxy.standard === 'eip1967-beacon') {
-    return `beacon proxy — upgrade authority lives in the beacon contract ${proxy.beacon}, not this address. Inspect the beacon to find its owner.`;
+    return `beacon slot points to ${proxy.beacon}. The beacon's owner/control signals are reported in the control graph; actual upgrade authorization is not proven without verified source.`;
   }
   if (proxy.admin && proxy.admin !== ZERO_ADDRESS) {
-    return `inferred from the EIP-1967 admin slot: ${proxy.admin} can upgrade this proxy. (Inferred from storage, NOT from verified source.)`;
+    return `EIP-1967 admin slot points to ${proxy.admin}. This is a control signal, not proof that the address can successfully invoke an upgrade path.`;
   }
   return 'admin slot is zero — likely a UUPS proxy where the upgrade function lives in the implementation and is gated by that contract\'s own access control. Not provable from storage alone.';
 }
@@ -272,6 +322,7 @@ function describeUpgradeAuthority(proxy: ProxyInfo): string {
 export function formatInspect(r: InspectResult): string {
   const lines: string[] = [];
   lines.push(`Address:   ${r.address}  (${r.network})`);
+  lines.push(`Block:     ${r.block.blockNumber} (${r.block.blockHash})`);
   lines.push(`Kind:      ${r.kind}${r.kind === 'contract' ? ` (${r.codeSize} bytes of code)` : ''}`);
   if (r.kind === 'contract') {
     lines.push(`Proxy:     ${r.proxy.isProxy ? `yes (${r.proxy.standard})` : 'no'}`);
@@ -292,6 +343,11 @@ export function formatInspect(r: InspectResult): string {
     }
     if (r.bytecode && r.bytecode.opcodes.length > 0) {
       lines.push(`Bytecode:  contains ${r.bytecode.opcodes.join(', ')}`);
+    }
+    if (r.controlGraph) {
+      lines.push(
+        `Control:   ${r.controlGraph.nodes.length} node(s), ${r.controlGraph.edges.length} observed edge(s)`,
+      );
     }
   }
   lines.push('Facts:');

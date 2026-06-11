@@ -17,10 +17,15 @@ from on-chain facts only.
 > worse than no tool.
 
 - **Network:** Pharos mainnet (Pacific Ocean), **chain ID 1672** — the default
-  and the network of **every example and output below**. Testnet (688688) is a
-  secondary toggle only.
-- **No mocks anywhere.** Every example in this README is a real mainnet RPC call
-  against a real contract/transaction. The hashes and addresses are live.
+  and the network of **every example and output below**. Atlantic testnet
+  (688689) is a secondary toggle only.
+- **Identity and consistency:** every command validates `eth_chainId`, verifies
+  the known mainnet genesis hash, rejects stale latest blocks, and pins all
+  state reads to one block hash.
+- **No mock production paths or example outputs.** Every example in this README
+  is a real mainnet RPC call against a real contract/transaction. Unit tests use
+  isolated deterministic test doubles for transport failures and pure decoding
+  edge cases; scheduled integration tests exercise the live chain.
 
 ---
 
@@ -67,7 +72,7 @@ prints ready-to-paste config. Full details in
 6. [`inspect` — control structure](#inspect--control-structure)
 7. [`autopsy` — post-failure forensics](#autopsy--post-failure-forensics)
 8. [`simulate` — pre-flight dry-run](#simulate--pre-flight-dry-run)
-9. [Token movements & approval safety](#token-movements--approval-safety)
+9. [Receipt activity & ERC-compatible call intents](#receipt-activity--erc-compatible-call-intents)
 10. [`probe` — capability check](#probe--capability-check)
 11. [Composable workflows](#composable-workflows)
 12. [Suggested demo (≈90 s)](#suggested-demo-90s)
@@ -240,16 +245,16 @@ Kind:      contract (2304 bytes of code)
 Proxy:     yes (eip1967)
 Impl:      0x4EE2F9B7cf3A68966c370F3eb2C16613d3235245
 Admin:     0x9740FF91F1985D8d2B71494aE1A2f723bb3Ed9E4
-Upgrade:   inferred from the EIP-1967 admin slot: 0x9740FF91F1985D8d2B71494aE1A2f723bb3Ed9E4
-           can upgrade this proxy. (Inferred from storage, NOT from verified source.)
+Upgrade:   EIP-1967 admin slot points to 0x9740FF91F1985D8d2B71494aE1A2f723bb3Ed9E4.
+           This is a control signal, not source-verified upgrade authorization.
 Facts:
   - EIP-1967 implementation slot is non-zero -> proxy. Implementation = 0x4EE2F9B7...
-  - EIP-1967 admin slot = 0x9740FF91... (controls upgrades).
+  - EIP-1967 admin slot = 0x9740FF91....
 ```
 
-**How to read it:** this contract delegates all logic to
-`0x4EE2F9B7…`, and `0x9740FF91…` is the only address that can repoint it. If
-that admin is an EOA, one key controls the contract's behavior.
+**How to read it:** this contract delegates logic to `0x4EE2F9B7…`, while the
+standard admin slot names `0x9740FF91…`. Shield profiles that endpoint in the
+control graph, but does not claim an upgrade call will succeed without source.
 
 ### Real example — an EOA and a non-proxy contract
 
@@ -306,9 +311,9 @@ Token:     Wrapped PROS (WPROS), decimals 18
 - **Can prove (from storage):** contract vs EOA; EIP-1967 implementation, admin,
   and beacon slots; legacy OZ implementation slot; EIP-1167 minimal-proxy shape;
   therefore whether it's a proxy and which address the admin slot names.
-- **Can read live (when the contract answers):** `owner`/`paused`, UUPS
-  `implementation`, beacon implementation, token metadata, ERC-165 interfaces,
-  and which notable opcodes the bytecode contains.
+- **Can read at one pinned block hash:** `owner`/`paused`, beacon implementation,
+  token metadata, ERC-165 interfaces, implementation code hashes, Safe-style
+  owners/threshold, timelock delay, UUPS `proxiableUUID`, and notable opcodes.
 - **Cannot prove (no public source API on Pharos):** verified source code, the
   human owner behind an admin address, or UUPS upgrade logic gated inside the
   implementation. These are reported as **inferred/live-read**, never as verified
@@ -319,9 +324,9 @@ Token:     Wrapped PROS (WPROS), decimals 18
 ## `autopsy` — post-failure forensics
 
 **What it does.** Pulls the transaction and receipt. If it succeeded, it says so
-plainly. If it failed, it traces the tx with `callTracer`, descends to the
-**deepest reverting call** (the true origin — parents just propagate the error),
-decodes the revert payload, and states a trace-supported probable cause.
+plainly. If it failed, it traces the tx with `callTracer`, follows the
+**root-propagated revert path**, reports caught/non-propagating reverts
+separately, decodes the payload, and states a trace-supported probable cause.
 
 ```
 pharos-shield autopsy <txhash> [--json]
@@ -402,10 +407,12 @@ undetermined*. It never asserts a cause the trace doesn't support.
 
 ## `simulate` — pre-flight dry-run
 
-**What it does.** Builds a call object and runs `debug_traceCall` at the latest
-block. It reports whether the call **would revert** (with the decoded reason),
-the would-be **call tree**, and any **native PROS movements** derivable from the
-trace. **It never sends a transaction.**
+**What it does.** Pins the latest canonical block hash, then runs
+`debug_traceCall` against that hash. It reports whether the call **would
+revert** (with the decoded reason),
+the would-be **call tree**, and any **native PROS value intents** visible in the
+trace. Trace-derived values are not labeled movements because they are not
+receipt-log or state-delta proofs. **It never sends a transaction.**
 
 ```
 pharos-shield simulate --from <addr> [--to <addr>] [--data 0x..] [--value 1.0] [--gas N] [--json]
@@ -445,7 +452,7 @@ Call tree:
   CALL -> 0x52c48d4213107b20bc583832b0d951fb9ca8f0b0 [balanceOf(address)]
 Notes:
   - SIMULATION ONLY — no transaction was sent. Result reflects current latest-block state.
-  - Would SUCCEED at the latest block (no top-level revert in the trace).
+  - Would SUCCEED at the pinned block (no top-level revert in the trace).
   - No non-zero native (PROS) movements in the trace.
 ```
 
@@ -469,20 +476,20 @@ Notes:
 
 ---
 
-## Token movements & approval safety
+## Receipt activity & ERC-compatible call intents
 
-Both `simulate` and `autopsy` decode **ERC-20/721 token movements and
-approvals**, with token `symbol`/`decimals` resolved live via `eth_call`. This
-is the pre-sign protection layer — and it stays **fact-based**: Shield reports
-*what moves* and *what you're approving*, never a token "risk score."
+Successful `autopsy` results decode `Transfer`/`Approval` receipt logs as actual
+on-chain activity. `simulate` and failed traces decode matching calldata only
+as **ERC-compatible call intents**. A selector match is never presented as proof
+that a target implements a token standard or that assets moved.
 
 Two honest sources:
 
 | Command | Source of truth | Reports |
 | --- | --- | --- |
 | `autopsy` (succeeded tx) | actual `Transfer`/`Approval` **event logs** in the receipt | what really moved |
-| `autopsy` (failed tx) | the reverted **call tree** | *attempted* movements (nothing actually moved) |
-| `simulate` | the would-be **call tree** (or your own call if it'd revert) | *intended* movements before you sign |
+| `autopsy` (failed tx) | reverted call-tree calldata | ERC-compatible call intents only |
+| `simulate` | would-be call-tree calldata | ERC-compatible call intents only |
 
 ### The headline: unlimited-approval detection
 
@@ -494,10 +501,10 @@ flags it as a **fact**, pre-sign. Real live simulation against a mainnet token:
 $ npm run cli -- simulate --from 0xf84d0A92... --to 0x52C48d42...(WPROS) \
     --data 0x095ea7b3<spender>ffffffff…ffff   # approve(spender, MAX)
 Outcome:   would succeed
-Approvals (intended):
-  owner 0xf84d0A92... grants 0xBF105f4f...: UNLIMITED (max uint256) [WPROS]  ⚠ UNLIMITED
+ERC-compatible call intents (selector-derived, not movements):
+  approve(address,uint256) -> WPROS; counterparty=0xBF105f4f...; value=max uint256 [UNLIMITED REQUEST]
 Notes:
-  - Approval grants 0xBF105f4f... an UNLIMITED allowance on WPROS.
+  - ERC-compatible call intent would request an unlimited approval.
 ```
 
 `isUnlimited` (exact `max uint256`), `isVeryLarge` (≥ 2²⁵⁵), and `operatorAll`
@@ -526,8 +533,8 @@ Notes:
   the raw base-unit amount is shown and labeled `decimals unknown` — never faked.
 - `transferFrom` shares one selector across ERC-20 and ERC-721 (identical
   signature), so its value is reported without asserting amount-vs-tokenId.
-- For a **failed** tx, movements are clearly labeled **ATTEMPTED** — nothing
-  moved, because it reverted.
+- For a **failed** tx, selector matches remain call intents; no movement is
+  claimed because the transaction reverted.
 - This is movement/approval *accounting*, not honeypot/tax detection. No scoring.
 
 ---
@@ -543,7 +550,7 @@ $ npm run cli -- probe
 Network:  mainnet (chain 1672)
 RPC:      https://rpc.pharos.xyz
 Trace:    traceCall=true traceTransaction=true
-Note:     debug_traceCall(callTracer) responded; trace namespace is enabled.
+Note:     debug_traceCall responded at the pinned block hash; debug_traceTransaction responded for a real mainnet tx.
 ```
 
 ---
@@ -693,6 +700,13 @@ npm run mcp:http       # Streamable HTTP on http://127.0.0.1:8731/mcp
 #   custom port:  node --import tsx mcp/server.ts --http --port 9000
 ```
 
+HTTP binds explicitly to `127.0.0.1` by default. Set
+`PHAROS_SHIELD_HTTP_HOST` or `--host` for another interface; any non-loopback
+binding requires a `PHAROS_SHIELD_HTTP_TOKEN` of at least 16 characters, supplied by clients as
+`Authorization: Bearer <token>`. Sessions default to a maximum of 32 and expire
+after 15 minutes idle; configure `PHAROS_SHIELD_HTTP_MAX_SESSIONS` and
+`PHAROS_SHIELD_HTTP_SESSION_IDLE_MS`.
+
 Both transports were tested end-to-end against mainnet (initialize → tools/list
 → tools/call returns real on-chain data). An agent should route user intent to a
 tool using the [decision table above](#which-command-do-i-want), then read the
@@ -713,15 +727,17 @@ Use `--json` for these shapes (text mode is a formatted view of the same data).
 | `proxy.isProxy` | boolean | any proxy slot/pattern detected |
 | `proxy.standard` | `eip1967` \| `eip1967-beacon` \| `legacy-oz` \| `eip1167-minimal` \| `none` | detected pattern |
 | `proxy.implementation` | address? | current logic contract |
-| `proxy.admin` | address? | EIP-1967 admin (upgrade authority) |
+| `proxy.admin` | address? | address stored in the EIP-1967 admin slot |
 | `proxy.beacon` | address? | beacon contract (beacon proxies) |
 | `proxy.beaconImplementation` | address? | impl resolved via `beacon.implementation()` |
-| `upgradeAuthority` | string | inferred-from-storage description |
+| `upgradeAuthority` | string | cautious control signal; not source-level authorization proof |
+| `controlGraph` | object? | code-hashed nodes and observed storage/owner/multisig/timelock/UUPS edges |
 | `bytecode` | object? | `{ opcodes[], hasDelegateCall, hasSelfDestruct, hasCreate2 }` |
 | `traits` | object? | live `{ owner?, paused?, implementation? }` |
 | `token` | object? | `{ name?, symbol?, decimals?, totalSupply? }` |
 | `interfaces` | string[]? | ERC-165 interfaces declared (e.g. `ERC-721`) |
-| `notes` | string[] | the facts behind the verdict |
+| `block` | object | pinned block number/hash/timestamp used for state reads |
+| `notes` | string[] | evidence and limitations behind the result |
 
 ### `autopsy`
 
@@ -731,12 +747,13 @@ Use `--json` for these shapes (text mode is a formatted view of the same data).
 | `status` | `success` \| `failed` \| `unknown` | receipt status |
 | `traced` | boolean | results came from a real call-tree trace |
 | `failingCall` | object? | `{ from, to, selector, value, error, depthPath }` |
+| `nonPropagatingErrors` | array? | caught/other errored frames not on the root-propagated path |
 | `revert.kind` | `Error` \| `Panic` \| `custom` \| `empty` \| `raw` | revert encoding |
 | `revert.reason` | string | decoded reason or faithful description |
 | `revert.selector` | string? | 4-byte selector of the revert payload |
 | `revert.signature` | string? | custom-error signature resolved via the signature DB (only when its args decode) |
 | `revert.args` | string[]? | decoded custom-error arguments, when resolvable |
-| `tokens` | object? | `{ transfers[], approvals[], notes[] }` (see below) |
+| `tokens` | object? | `{ transfers[], approvals[], callIntents[], notes[] }` |
 | `probableCause` | string | trace-supported cause or "cause undetermined" |
 
 ### `simulate`
@@ -747,8 +764,8 @@ Use `--json` for these shapes (text mode is a formatted view of the same data).
 | `willRevert` | boolean | top-level revert in the trace |
 | `revert` | object? | decoded revert (same shape as autopsy) |
 | `calls` | array | flattened call tree: `{ type, from, to, selector, value, errored, depth }` |
-| `nativeMovements` | array | `{ from, to, pros }` non-zero native transfers |
-| `tokens` | object | `{ transfers[], approvals[], notes[] }` (see below) |
+| `nativeValueIntents` | array | `{ from, to, pros }` trace-derived native-value calls; not proven movements |
+| `tokens` | object | `{ transfers[], approvals[], callIntents[], notes[] }` |
 | `callCount` | number | frames in the tree |
 
 ### `tokens` (shared by `simulate` & `autopsy`)
@@ -757,11 +774,13 @@ Use `--json` for these shapes (text mode is a formatted view of the same data).
 | --- | --- | --- |
 | `transfers[]` | array | `{ token, symbol?, standard, from, to, amount, source }` |
 | `approvals[]` | array | `{ token, symbol?, standard, owner, spender, amount, isUnlimited, isVeryLarge, operatorAll, source }` |
-| `notes[]` | string[] | factual flags (e.g. "grants … an UNLIMITED allowance on WPROS") |
+| `callIntents[]` | array | selector-derived ERC-compatible calldata interpretation; includes target code presence |
+| `notes[]` | string[] | factual flags and explicit intent limitations |
 
-`source` is `"log"` (real event, succeeded tx) or `"call"` (decoded from a call
-tree — intended/attempted). `amount` is decimals-formatted with `symbol` when
-the token answers, else raw base units labeled `decimals unknown`.
+`transfers` and `approvals` use `source: "log"` and only come from successful
+receipt events. `callIntents` use `source: "call-intent"` and never assert
+standard support or completed movement. Amount metadata is read at the same
+pinned block hash.
 
 ---
 
@@ -789,8 +808,7 @@ Common read selectors you can paste directly: `balanceOf(address)` =
 
 ## Current build verification
 
-Verified **2026-06-09** against live Pharos mainnet (latest block ≈ 9,741,966 at
-the time of this run), Node v24, ethers v6:
+Re-verified **2026-06-11** against live Pharos mainnet, Node 20, ethers v6:
 
 ```text
 $ npx tsc --noEmit
@@ -803,14 +821,15 @@ $ npm run cli -- probe
 Network:  mainnet (chain 1672)
 RPC:      https://rpc.pharos.xyz
 Trace:    traceCall=true traceTransaction=true
-Note:     debug_traceCall(callTracer) responded; trace namespace is enabled.
+Note:     both methods responded; traceTransaction used a real mainnet tx.
 ```
 
-MCP transports were exercised end-to-end the same day: `initialize` →
+Unit tests cover wrong chains, stale/outage probes, selector intent semantics,
+signature collisions, rollback accounting, propagated vs caught reverts, and
+proxy control graphs. MCP transports are exercised end-to-end: `initialize` →
 `tools/list` (returns `shield_inspect`, `shield_autopsy`, `shield_simulate`,
 `shield_probe`) → `tools/call` returning real on-chain data, over **both** stdio
-and Streamable HTTP. `npm audit` reports 2 moderate advisories in the dev
-toolchain (transitive); no runtime-path impact.
+and Streamable HTTP. A scheduled GitHub Actions job runs the real mainnet suite.
 
 ---
 
@@ -846,17 +865,20 @@ each one proves:
 
 ## Verified-vs-degraded status
 
-Everything here was probed against live Pharos mainnet on 2026-06-09.
+Everything here was probed against live Pharos mainnet on 2026-06-11.
 
 | Capability | Status | Evidence |
 | --- | --- | --- |
 | Mainnet RPC `https://rpc.pharos.xyz` | **Confirmed** | `eth_chainId` → `0x688` (1672) |
+| Mainnet genesis | **Confirmed** | block 0 hash `0x9695a707…670929f` |
+| Wrong-chain rejection | **Confirmed** | Ethereum chain 1 override is rejected before analysis |
+| Block-hash pinning | **Confirmed** | Pharos accepts raw block hashes for code/storage/call/trace reads |
 | `debug_traceTransaction` (callTracer) | **Confirmed** | Returns a call frame for real failed txs (see autopsy examples) |
 | `debug_traceCall` (callTracer) | **Confirmed** | Returns a frame; requires a `from` field |
 | `eth_getCode` / `eth_getStorageAt` | **Confirmed** | EIP-1967 slot reads verified against real proxies |
 | Top-level revert behavior | **Confirmed quirk** | `debug_traceCall` returns JSON-RPC error code 3 with revert data in `error.data` (handled) |
 | Explorer source-verification API | **Not available** | `pharosscan.xyz` sits behind a bot wall and exposes no Etherscan/Blockscout-style source API. `inspect` is therefore scoped to storage-provable facts; it does **not** claim "verified source". |
-| Testnet (688688) public RPC | **Unconfirmed** | No public trace-enabled testnet RPC reachable from a clean environment at build time. Override with `PHAROS_TESTNET_RPC`. |
+| Atlantic testnet (688689) | **Secondary** | `https://atlantic.dplabs-internal.com`; trace methods remain live-probed |
 | Pharos Agent Center / Anvita Flow MCP ingestion | **Unconfirmed** | The hackathon portal could not be inspected programmatically. Shield ships **both** a SKILL.md directory and an MCP server so it works regardless of which the Agent Center ingests. |
 
 ### Graceful degradation
@@ -873,6 +895,8 @@ command reports that honestly rather than faking a trace.
 | Symptom | Likely cause | Fix |
 | --- | --- | --- |
 | `probe` shows `traceCall=false` | RPC has `debug_*` disabled | Point `PHAROS_MAINNET_RPC` at a trace-enabled endpoint |
+| `RPC chain mismatch` | RPC override points at another chain | Use a Pharos chain-1672 endpoint |
+| `Latest block ... is stale` | endpoint is lagging | Switch RPC or adjust `PHAROS_MAX_BLOCK_AGE_SECONDS` deliberately |
 | `autopsy` says `Status: NOT FOUND` | Wrong network or wrong hash | Check the hash; confirm `PHAROS_NETWORK` matches the tx's chain |
 | `autopsy` shows `degraded: no trace available` | Trace namespace unavailable on this RPC | Use a trace-enabled RPC; receipt-level facts are still reported |
 | `simulate` errors with `from is needed` | `--from` omitted | Pharos requires a sender for `debug_traceCall`; pass `--from` |
@@ -886,13 +910,19 @@ command reports that honestly rather than faking a trace.
 | Network | Chain ID | Default RPC | Status |
 | --- | --- | --- | --- |
 | mainnet (default) | 1672 | `https://rpc.pharos.xyz` | verified |
-| testnet | 688688 | `https://testnet.dplabs-internal.com` | unconfirmed (override via env) |
+| testnet | 688689 | `https://atlantic.dplabs-internal.com` | secondary; live-probed |
 
 Environment variables (see `.env.example`):
 
 - `PHAROS_NETWORK` — `mainnet` (default) or `testnet`
 - `PHAROS_MAINNET_RPC` / `PHAROS_TESTNET_RPC` — override RPC URLs
 - `PHAROS_RPC_TIMEOUT_MS` — request timeout (default 20000)
+- `PHAROS_MAX_BLOCK_AGE_SECONDS` — freshness limit (mainnet default 300)
+- `PHAROS_GENESIS_HASH` — optional expected-genesis override
+- `PHAROS_SHIELD_HTTP_HOST` — HTTP bind host (default `127.0.0.1`)
+- `PHAROS_SHIELD_HTTP_TOKEN` — bearer token; required for non-loopback binding
+- `PHAROS_SHIELD_HTTP_MAX_SESSIONS` / `PHAROS_SHIELD_HTTP_SESSION_IDLE_MS`
+  — HTTP session cap and idle eviction
 
 ---
 
@@ -903,7 +933,10 @@ Environment variables (see `.env.example`):
 2. **No mocks, ever.** Every output comes from a real RPC call. Unavailable
    capabilities are degraded and labeled, never faked.
 3. **Mainnet is the source of truth.** Every example here is mainnet (1672).
-4. **Pre-flight is read-only.** `simulate` uses `debug_traceCall`; it never
+4. **Wrong chains are rejected.** Chain ID and mainnet genesis are checked
+   before command results are labeled.
+5. **One block per result.** State reads use the same pinned block hash.
+6. **Pre-flight is read-only.** `simulate` uses `debug_traceCall`; it never
    broadcasts a transaction.
 
 ---

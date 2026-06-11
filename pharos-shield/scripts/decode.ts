@@ -141,7 +141,7 @@ export function hexToBigInt(hex: string | undefined): bigint {
   return BigInt(hex);
 }
 
-export interface ValueTransfer {
+export interface NativeValueIntent {
   from: string;
   to: string;
   /** Wei as bigint. */
@@ -151,17 +151,16 @@ export interface ValueTransfer {
 }
 
 /**
- * Extract native-value (PROS) movements from a call tree. Only counts frames
- * that carry a non-zero `value` and did NOT error (reverted frames move
- * nothing). This is provable from the trace alone; it does not attempt to
- * decode ERC20 token deltas (that would require trusting event logs/ABIs that
- * the callTracer does not provide).
+ * Extract successful-path native-value (PROS) call intents from a call tree.
+ * A callTracer value field is not a receipt log or state delta, so callers must
+ * not represent it as a verified movement. Reverted subtrees are excluded.
  */
-export function nativeTransfers(frames: CallFrame[]): ValueTransfer[] {
-  const out: ValueTransfer[] = [];
-  for (const f of frames) {
+export function nativeValueIntents(root: CallFrame): NativeValueIntent[] {
+  const out: NativeValueIntent[] = [];
+  const walk = (f: CallFrame, ancestorErrored: boolean): void => {
+    const rolledBack = ancestorErrored || Boolean(f.error) || Boolean(f.revertReason);
     const v = hexToBigInt(f.value);
-    if (v > 0n && !f.error && f.to) {
+    if (v > 0n && !rolledBack && f.to) {
       out.push({
         from: f.from,
         to: f.to,
@@ -169,6 +168,8 @@ export function nativeTransfers(frames: CallFrame[]): ValueTransfer[] {
         formatted: ethers.formatEther(v),
       });
     }
-  }
+    for (const child of f.calls ?? []) walk(child, rolledBack);
+  };
+  walk(root, false);
   return out;
 }

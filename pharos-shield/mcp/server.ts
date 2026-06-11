@@ -20,7 +20,7 @@
  */
 
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
-import { randomUUID } from 'node:crypto';
+import { randomUUID, timingSafeEqual } from 'node:crypto';
 import { z } from 'zod';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
@@ -64,9 +64,11 @@ function buildServer(): McpServer {
       description:
         'Inspect a Pharos contract/address. Classifies it as contract or EOA, then reports its ' +
         'control structure from on-chain facts: proxy detection (EIP-1967 implementation/admin/' +
-        'beacon, legacy-OZ, and EIP-1167 minimal-proxy), who holds upgrade authority, a PUSH-aware ' +
+        'beacon, legacy-OZ, and EIP-1167 minimal-proxy), a control graph with code hashes, reported ' +
+        'owners, Safe-style thresholds, timelock delays, and UUPS compatibility, plus a PUSH-aware ' +
         'bytecode scan for DELEGATECALL / SELFDESTRUCT / CREATE2, live owner()/paused() reads, token ' +
-        'name/symbol/decimals/totalSupply, and declared ERC-165 interfaces — each only when the chain ' +
+        'name/symbol/decimals/totalSupply, and declared ERC-165 interfaces — each pinned to one block ' +
+        'hash and only when the chain ' +
         'answers. Use for: "is this a proxy / who can upgrade it", "is this a contract or wallet", ' +
         '"can this contract self-destruct", "who owns this contract", "what token is this". Pharos ' +
         'mainnet by default. Reports only what storage/chain proves; never a SAFE/UNSAFE verdict or ' +
@@ -90,12 +92,12 @@ function buildServer(): McpServer {
       title: 'Autopsy a Pharos transaction',
       description:
         'Diagnose a Pharos transaction from its hash. If it failed, traces it with callTracer, finds ' +
-        'the deepest reverting call, decodes the revert reason (Error/Panic/custom selector, with ' +
+        'the deepest call on the root-propagated revert path, separates caught errors, and decodes the revert reason (Error/Panic/custom selector, with ' +
         '4-byte selectors resolved via the openchain signature DB), and reports a trace-supported ' +
-        'probable cause (allowance, insufficient balance, slippage, paused, deadline, overflow, ' +
+        'root-propagated probable cause (allowance, insufficient balance, slippage, paused, deadline, overflow, ' +
         'out-of-gas) or "cause undetermined". If it succeeded, says so and decodes the real ERC-20/721 ' +
-        'Transfer/Approval events from the receipt; for a failure it reports the *attempted* token ' +
-        'movements. Use for: "why did my tx fail/revert", "did this tx succeed or fail", "which inner ' +
+        'Transfer/Approval events from the receipt; for a failure it separately reports selector-derived ' +
+        'ERC-compatible call intents, never fake movements. Use for: "why did my tx fail/revert", "did this tx succeed or fail", "which inner ' +
         'call reverted", "what tokens did this move".',
       inputSchema: {
         txhash: z.string().describe('0x-prefixed 32-byte transaction hash'),
@@ -115,12 +117,13 @@ function buildServer(): McpServer {
     {
       title: 'Simulate (dry-run) a Pharos transaction',
       description:
-        'Pre-flight / dry-run a Pharos call via debug_traceCall at the latest block, before signing. ' +
+        'Pre-flight / dry-run a Pharos call via debug_traceCall at one pinned latest-block hash, before signing. ' +
         'Reports whether it would revert (with decoded reason), the would-be call tree, native PROS ' +
-        'movements, and the ERC-20/721 token movements + approvals it would make — flagging UNLIMITED ' +
+        'value intents, and selector-derived ERC-compatible transfer/approval call intents — flagging UNLIMITED ' +
         'approvals (max uint256 / setApprovalForAll), the most common way wallets get drained. Use for: ' +
         '"will this tx work / revert", "what does this transaction do / what would it move before I ' +
-        'sign", "is this an unlimited approval", "dry-run this call". NEVER sends a transaction — it is ' +
+        'sign", "is this an unlimited approval intent", "dry-run this call". Call intents are not claimed ' +
+        'as completed token movements. NEVER sends a transaction — it is ' +
         'read-only.',
       inputSchema: {
         from: z.string().describe('0x sender address (required by Pharos debug_traceCall)'),
@@ -183,12 +186,62 @@ async function runStdio(): Promise<void> {
   process.stderr.write('pharos-shield MCP server running on stdio\n');
 }
 
-async function runHttp(port: number): Promise<void> {
+interface HttpSession {
+  transport: StreamableHTTPServerTransport;
+  lastSeen: number;
+}
+
+interface HttpState {
+  sessions: Map<string, HttpSession>;
+  pendingSessions: number;
+}
+
+interface HttpOptions {
+  host: string;
+  port: number;
+  token?: string;
+  maxSessions: number;
+  sessionIdleMs: number;
+}
+
+function positiveInteger(raw: string | undefined, fallback: number, label: string): number {
+  if (raw === undefined || raw.trim() === '') return fallback;
+  const value = Number(raw);
+  if (!Number.isSafeInteger(value) || value <= 0) {
+    throw new Error(`${label} must be a positive integer.`);
+  }
+  return value;
+}
+
+function isLoopback(host: string): boolean {
+  return host === '127.0.0.1' || host === '::1';
+}
+
+function authorized(req: IncomingMessage, token: string | undefined): boolean {
+  if (!token) return true;
+  const header = req.headers.authorization;
+  const supplied =
+    typeof header === 'string' && header.startsWith('Bearer ')
+      ? header.slice('Bearer '.length)
+      : undefined;
+  if (!supplied) return false;
+  const expectedBytes = Buffer.from(token);
+  const suppliedBytes = Buffer.from(supplied);
+  return (
+    expectedBytes.length === suppliedBytes.length &&
+    timingSafeEqual(expectedBytes, suppliedBytes)
+  );
+}
+
+async function runHttp(options: HttpOptions): Promise<void> {
   // Stateful Streamable HTTP: one transport+server per session id.
-  const transports = new Map<string, StreamableHTTPServerTransport>();
+  const state: HttpState = {
+    sessions: new Map<string, HttpSession>(),
+    pendingSessions: 0,
+  };
 
   const httpServer = createServer((req: IncomingMessage, res: ServerResponse) => {
-    void handleHttp(req, res, transports).catch((err: unknown) => {
+    void handleHttp(req, res, state, options).catch((err: unknown) => {
       const message = err instanceof Error ? err.message : String(err);
       if (!res.headersSent) {
         res.writeHead(500, { 'Content-Type': 'application/json' });
@@ -197,18 +250,36 @@ async function runHttp(port: number): Promise<void> {
     });
   });
 
-  httpServer.listen(port, () => {
-    process.stderr.write(
-      `pharos-shield MCP server listening on http://127.0.0.1:${port}/mcp\n`,
-    );
+  await new Promise<void>((resolve, reject) => {
+    httpServer.once('error', reject);
+    httpServer.listen(options.port, options.host, () => {
+      httpServer.off('error', reject);
+      process.stderr.write(
+        `pharos-shield MCP server listening on http://${options.host}:${options.port}/mcp ` +
+          `(maxSessions=${options.maxSessions}, idle=${options.sessionIdleMs}ms, ` +
+          `auth=${options.token ? 'bearer' : 'loopback-only'})\n`,
+      );
+      resolve();
+    });
   });
 }
 
 async function handleHttp(
   req: IncomingMessage,
   res: ServerResponse,
-  transports: Map<string, StreamableHTTPServerTransport>,
+  state: HttpState,
+  options: HttpOptions,
 ): Promise<void> {
+  const { sessions } = state;
+  if (!authorized(req, options.token)) {
+    res.writeHead(401, {
+      'Content-Type': 'application/json',
+      'WWW-Authenticate': 'Bearer',
+    });
+    res.end(JSON.stringify({ error: 'unauthorized' }));
+    return;
+  }
+
   const url = req.url ?? '/';
   if (!url.startsWith('/mcp')) {
     res.writeHead(404, { 'Content-Type': 'application/json' });
@@ -218,29 +289,64 @@ async function handleHttp(
 
   const sessionId = req.headers['mcp-session-id'];
   const sid = Array.isArray(sessionId) ? sessionId[0] : sessionId;
+  const now = Date.now();
+  for (const [id, session] of sessions) {
+    if (now - session.lastSeen > options.sessionIdleMs) {
+      sessions.delete(id);
+      void session.transport.close().catch((error: unknown) => {
+        const message = error instanceof Error ? error.message : String(error);
+        process.stderr.write(`failed to close idle MCP session ${id}: ${message}\n`);
+      });
+    }
+  }
 
   let transport: StreamableHTTPServerTransport | undefined =
-    sid ? transports.get(sid) : undefined;
+    sid ? sessions.get(sid)?.transport : undefined;
+
+  if (sid && !transport) {
+    res.writeHead(404, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: 'unknown or expired MCP session' }));
+    return;
+  }
+  if (sid) {
+    const session = sessions.get(sid);
+    if (session) session.lastSeen = now;
+  }
 
   if (!transport) {
+    if (sessions.size + state.pendingSessions >= options.maxSessions) {
+      res.writeHead(503, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'MCP session limit reached' }));
+      return;
+    }
+    state.pendingSessions++;
     // New session: create a transport + server pair.
     transport = new StreamableHTTPServerTransport({
       sessionIdGenerator: () => randomUUID(),
       onsessioninitialized: (id: string) => {
-        transports.set(id, transport!);
+        sessions.set(id, { transport: transport!, lastSeen: Date.now() });
       },
     });
     transport.onclose = () => {
-      if (transport!.sessionId) transports.delete(transport!.sessionId);
+      if (transport!.sessionId) sessions.delete(transport!.sessionId);
     };
     const server = buildServer();
     // The SDK's Transport interface and the concrete class disagree on the
     // optionality of `onclose` under exactOptionalPropertyTypes; the runtime
     // contract is satisfied (we set onclose above). Cast at this boundary only.
-    await server.connect(transport as Transport);
+    try {
+      await server.connect(transport as Transport);
+    } catch (err) {
+      state.pendingSessions--;
+      throw err;
+    }
   }
 
-  await transport.handleRequest(req, res);
+  try {
+    await transport.handleRequest(req, res);
+  } finally {
+    if (!sid && state.pendingSessions > 0) state.pendingSessions--;
+  }
 }
 
 async function main(): Promise<void> {
@@ -250,10 +356,37 @@ async function main(): Promise<void> {
     const portIdx = argv.indexOf('--port');
     const port =
       portIdx >= 0 && argv[portIdx + 1] ? Number(argv[portIdx + 1]) : 8731;
-    if (!Number.isFinite(port) || port <= 0) {
+    if (!Number.isSafeInteger(port) || port <= 0 || port > 65_535) {
       throw new Error(`Invalid --port value.`);
     }
-    await runHttp(port);
+    const hostIdx = argv.indexOf('--host');
+    const host =
+      hostIdx >= 0 && argv[hostIdx + 1]
+        ? argv[hostIdx + 1]!
+        : process.env.PHAROS_SHIELD_HTTP_HOST?.trim() || '127.0.0.1';
+    const token = process.env.PHAROS_SHIELD_HTTP_TOKEN?.trim() || undefined;
+    if (!isLoopback(host) && (!token || token.length < 16)) {
+      throw new Error(
+        'Non-loopback HTTP binding requires PHAROS_SHIELD_HTTP_TOKEN bearer authentication with at least 16 characters.',
+      );
+    }
+    const maxSessions = positiveInteger(
+      process.env.PHAROS_SHIELD_HTTP_MAX_SESSIONS,
+      32,
+      'PHAROS_SHIELD_HTTP_MAX_SESSIONS',
+    );
+    const sessionIdleMs = positiveInteger(
+      process.env.PHAROS_SHIELD_HTTP_SESSION_IDLE_MS,
+      15 * 60 * 1000,
+      'PHAROS_SHIELD_HTTP_SESSION_IDLE_MS',
+    );
+    await runHttp({
+      host,
+      port,
+      ...(token ? { token } : {}),
+      maxSessions,
+      sessionIdleMs,
+    });
   } else {
     await runStdio();
   }

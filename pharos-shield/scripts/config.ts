@@ -8,10 +8,8 @@
  *    example/demo in this repo is run on. Its RPC (https://rpc.pharos.xyz) was
  *    confirmed on 2026-06-09 to return chainId 0x688 and to expose the debug_*
  *    trace namespace (debug_traceTransaction / debug_traceCall, callTracer).
- *  - Testnet (chain 688688) is a SECONDARY convenience toggle. A public,
- *    trace-enabled testnet RPC could NOT be confirmed from a clean environment
- *    at build time, so its default URL is marked unconfirmed below. Override it
- *    with PHAROS_TESTNET_RPC if you have a working endpoint.
+ *  - Atlantic testnet (chain 688689) is a SECONDARY convenience toggle.
+ *    Trace support is probed live and never inferred from mainnet behavior.
  */
 
 export type NetworkName = 'mainnet' | 'testnet';
@@ -23,6 +21,10 @@ export interface NetworkConfig {
   readonly explorer: string;
   /** Native currency symbol. */
   readonly symbol: string;
+  /** Verified genesis block hash, when known. */
+  readonly genesisHash?: string;
+  /** Real mined transaction used only for live trace capability probing. */
+  readonly traceProbeTransactionHash?: string;
   /**
    * Whether the built-in default RPC for this network was verified end-to-end
    * (chainId + debug trace namespace) at build time. Used purely for honest
@@ -61,16 +63,20 @@ const MAINNET: NetworkConfig = {
   rpcUrl: 'https://rpc.pharos.xyz',
   explorer: 'https://pharosscan.xyz',
   symbol: 'PROS',
+  genesisHash:
+    '0x9695a707b856c2fa3ffbf7a5e8d0e831529ea99600957da7a22bd25fe670929f',
+  traceProbeTransactionHash:
+    '0xdeeb262fad28864a8e031db91e99de0bb4bd42aff936876d577adcddcf0de3ff',
   defaultRpcVerified: true,
 };
 
 const TESTNET: NetworkConfig = {
   name: 'testnet',
-  chainId: 688688,
-  // UNCONFIRMED default — a public trace-enabled testnet RPC was not reachable
-  // from a clean environment at build time. Override via PHAROS_TESTNET_RPC.
-  rpcUrl: 'https://testnet.dplabs-internal.com',
-  explorer: 'https://testnet.pharosscan.xyz',
+  chainId: 688689,
+  // Atlantic is the current public Pharos testnet. Trace capability is still
+  // probed live rather than assumed.
+  rpcUrl: 'https://atlantic.dplabs-internal.com',
+  explorer: 'https://atlantic.pharosscan.xyz',
   symbol: 'PROS',
   defaultRpcVerified: false,
 };
@@ -84,7 +90,7 @@ function parseNetwork(raw: string | undefined): NetworkName {
   if (raw === undefined || raw.trim() === '') return 'mainnet';
   const v = raw.trim().toLowerCase();
   if (v === 'mainnet' || v === '1672') return 'mainnet';
-  if (v === 'testnet' || v === '688688') return 'testnet';
+  if (v === 'testnet' || v === '688689') return 'testnet';
   throw new Error(
     `Invalid PHAROS_NETWORK="${raw}". Expected "mainnet" (default) or "testnet".`,
   );
@@ -94,6 +100,10 @@ export interface ResolvedConfig {
   readonly network: NetworkConfig;
   readonly rpcUrl: string;
   readonly timeoutMs: number;
+  /** Maximum acceptable age of the pinned latest block. */
+  readonly maxBlockAgeSeconds: number;
+  /** Optional operator override for private deployments or future networks. */
+  readonly expectedGenesisHash?: string;
 }
 
 /**
@@ -126,7 +136,40 @@ export function loadConfig(
     timeoutMs = parsed;
   }
 
-  return { network, rpcUrl, timeoutMs };
+  let maxBlockAgeSeconds = network.name === 'mainnet' ? 300 : 900;
+  const rawMaxAge = env.PHAROS_MAX_BLOCK_AGE_SECONDS;
+  if (rawMaxAge !== undefined && rawMaxAge.trim() !== '') {
+    const parsed = Number(rawMaxAge);
+    if (!Number.isFinite(parsed) || parsed <= 0) {
+      throw new Error(
+        `Invalid PHAROS_MAX_BLOCK_AGE_SECONDS="${rawMaxAge}". Expected a positive number of seconds.`,
+      );
+    }
+    maxBlockAgeSeconds = parsed;
+  }
+
+  const genesisOverride = env.PHAROS_GENESIS_HASH?.trim();
+  if (
+    genesisOverride !== undefined &&
+    genesisOverride !== '' &&
+    !/^0x[0-9a-fA-F]{64}$/.test(genesisOverride)
+  ) {
+    throw new Error(
+      `Invalid PHAROS_GENESIS_HASH="${genesisOverride}". Expected 0x + 64 hex characters.`,
+    );
+  }
+  const expectedGenesisHash =
+    genesisOverride && genesisOverride !== ''
+      ? genesisOverride.toLowerCase()
+      : network.genesisHash;
+
+  return {
+    network,
+    rpcUrl,
+    timeoutMs,
+    maxBlockAgeSeconds,
+    ...(expectedGenesisHash ? { expectedGenesisHash } : {}),
+  };
 }
 
 export function getNetwork(name: NetworkName): NetworkConfig {

@@ -2,8 +2,8 @@
  * autopsy <txhash> — POST-FAILURE analysis.
  *
  * Pulls the tx + receipt; if it succeeded, says so. For a failure, traces it
- * with callTracer, descends to the deepest errored call, decodes the revert,
- * and reports the failing call path. Probable cause is offered ONLY when the
+ * with callTracer, follows the root-propagated error path, separates caught
+ * errors, and decodes the revert. Probable cause is offered ONLY when the
  * trace + decoded reason support it; otherwise "cause undetermined".
  *
  * Falls back to receipt + revert-reason level (no call tree) when the RPC's
@@ -11,11 +11,11 @@
  */
 
 import { ethers } from 'ethers';
-import type { ShieldClient } from './rpc.js';
-import { RpcError } from './rpc.js';
+import type { ChainSnapshot, ShieldClient } from './rpc.js';
+import { callAt, prepareCommand, RpcError } from './rpc.js';
 import {
   traceTransaction,
-  deepestErroredFrame,
+  propagatedFailure,
   countCalls,
   flatten,
   type CallFrame,
@@ -26,6 +26,7 @@ import {
   decodeTokenCalls,
   enrichTokenMeta,
   buildTokenReport,
+  readCodePresence,
   tokenAddressesOf,
   type DecodedTokens,
   type TokenReport,
@@ -57,13 +58,16 @@ export interface AutopsyResult {
   to?: string;
   blockNumber?: number;
   gasUsed?: string;
+  block?: Pick<ChainSnapshot, 'blockNumber' | 'blockHash' | 'timestamp'>;
   callCount?: number;
   failingCall?: FailingCall;
+  /** Errored frames that did not propagate the transaction's root revert. */
+  nonPropagatingErrors?: FailingCall[];
   revert?: DecodedRevert;
   /**
-   * Token movements & approvals. For a SUCCEEDED tx these are the real events
-   * that occurred (decoded from receipt logs). For a FAILED tx nothing moved —
-   * these are the *attempted* movements decoded from the trace, labeled so.
+   * For a SUCCEEDED tx, transfers/approvals are decoded from real receipt logs.
+   * For a FAILED tx, selector-derived calls are separate ERC-compatible intents;
+   * they are never represented as movements.
    */
   tokens?: TokenReport;
   /** Honest, trace-supported cause hypothesis or an explicit "undetermined". */
@@ -172,6 +176,7 @@ export async function autopsy(
   }
 
   const notes: string[] = [];
+  const initialSnapshot = await prepareCommand(client);
   const tx = await client.provider.getTransaction(txHash);
   const receipt = await client.provider.getTransactionReceipt(txHash);
 
@@ -184,10 +189,19 @@ export async function autopsy(
       traced: false,
       probableCause:
         'transaction not found on this network — check the hash and PHAROS_NETWORK',
-      notes: [`No transaction/receipt for ${txHash} on ${client.config.rpcUrl}.`],
+      notes: [
+        `No transaction/receipt for ${txHash} on ${client.config.rpcUrl}.`,
+        `Chain validated at block ${initialSnapshot.blockNumber} (${initialSnapshot.blockHash}).`,
+      ],
     };
   }
 
+  const snapshot = await prepareCommand(client, receipt.blockHash);
+  if (snapshot.blockNumber !== receipt.blockNumber) {
+    throw new Error(
+      `Receipt block mismatch: receipt=${receipt.blockNumber}, pinned=${snapshot.blockNumber}.`,
+    );
+  }
   const base: AutopsyResult = {
     network: client.config.network.name,
     txHash,
@@ -198,6 +212,11 @@ export async function autopsy(
     ...(tx.to ? { to: tx.to } : {}),
     blockNumber: receipt.blockNumber,
     gasUsed: receipt.gasUsed.toString(),
+    block: {
+      blockNumber: snapshot.blockNumber,
+      blockHash: snapshot.blockHash,
+      timestamp: snapshot.timestamp,
+    },
     probableCause: '',
     notes,
   };
@@ -211,7 +230,7 @@ export async function autopsy(
       topics: l.topics,
       data: l.data,
     }));
-    const tokens = await reportTokens(client, decodeTokenLogs(logs));
+    const tokens = await reportTokens(client, decodeTokenLogs(logs), snapshot);
     base.tokens = tokens;
     if (tokens.transfers.length > 0 || tokens.approvals.length > 0) {
       notes.push(
@@ -232,8 +251,11 @@ export async function autopsy(
       `DEGRADED: call-tree trace unavailable (${msg}). Reporting receipt-level facts only.`,
     );
     // Best-effort: re-run the call at the failing block to recover revert data.
-    const revert = await recoverRevertViaCall(client, tx, receipt.blockNumber);
+    const revert = await recoverRevertViaCall(client, tx, snapshot);
     if (revert) {
+      notes.push(
+        'The eth_call fallback used the failing block end-state, not the transaction pre-state; its revert result is an approximation.',
+      );
       await enrichRevertSignature(revert);
       base.revert = revert;
     }
@@ -244,20 +266,25 @@ export async function autopsy(
   base.traced = true;
   base.callCount = countCalls(root);
 
-  // Attempted token movements/approvals decoded from the (reverted) call tree.
-  const attemptedFrames = flatten(root).map((f) => f.frame);
-  const attemptedTokens = await reportTokens(client, decodeTokenCalls(attemptedFrames));
-  base.tokens = attemptedTokens;
-  if (attemptedTokens.transfers.length > 0 || attemptedTokens.approvals.length > 0) {
+  // Selector-derived call intents from the reverted call tree.
+  const tracedFrames = flatten(root).map((f) => f.frame);
+  const intentReport = await reportTokens(
+    client,
+    decodeTokenCalls(tracedFrames),
+    snapshot,
+  );
+  base.tokens = intentReport;
+  if (intentReport.callIntents.length > 0) {
     notes.push(
-      `ATTEMPTED token activity (tx reverted, so nothing actually moved): ` +
-        `${attemptedTokens.transfers.length} transfer(s), ${attemptedTokens.approvals.length} approval(s).`,
+      `${intentReport.callIntents.length} ERC-compatible call intent(s) decoded from calldata. ` +
+        'These are not actual or proven attempted token movements.',
     );
+    notes.push(...intentReport.notes);
   }
 
-  const deepest = deepestErroredFrame(root);
+  const failure = propagatedFailure(root);
 
-  if (!deepest) {
+  if (!failure) {
     notes.push(
       'Trace succeeded but no frame carried an error flag, despite status=0. ' +
         'The revert may be at the top level; inspecting root output.',
@@ -270,16 +297,25 @@ export async function autopsy(
     return base;
   }
 
-  const failing = toFailingCall(deepest.frame, deepest.path);
-  const revert = decodeRevert(deepest.frame.output);
+  const origin = failure.path[failure.path.length - 1]!;
+  const failing = toFailingCall(origin.frame, origin.path);
+  const revert = decodeRevert(origin.frame.output);
   await enrichRevertSignature(revert);
   // Resolve the failing call's own selector to a function name when possible.
   await enrichFailingSelector(failing);
   base.failingCall = failing;
+  if (failure.nonPropagating.length > 0) {
+    base.nonPropagatingErrors = failure.nonPropagating.map(({ frame, path }) =>
+      toFailingCall(frame, path),
+    );
+    notes.push(
+      `${failure.nonPropagating.length} errored frame(s) did not propagate the root revert and are reported separately.`,
+    );
+  }
   base.revert = revert;
   base.probableCause = inferCause(revert, failing);
   notes.push(
-    `Failing call at depth ${deepest.depth}: ${failing.from} -> ${failing.to ?? '(contract creation)'} ` +
+    `Propagated failing call at depth ${origin.depth}: ${failing.from} -> ${failing.to ?? '(contract creation)'} ` +
       `[${failing.selector}]${failing.error ? ' error=' + failing.error : ''}.`,
   );
   return base;
@@ -315,9 +351,14 @@ async function enrichRevertSignature(revert: DecodedRevert): Promise<void> {
 async function reportTokens(
   client: ShieldClient,
   decoded: DecodedTokens,
+  snapshot: ChainSnapshot,
 ): Promise<TokenReport> {
-  const meta = await enrichTokenMeta(client, tokenAddressesOf(decoded));
-  return buildTokenReport(decoded, meta);
+  const addresses = tokenAddressesOf(decoded);
+  const [meta, code] = await Promise.all([
+    enrichTokenMeta(client, addresses, snapshot),
+    readCodePresence(client, addresses, snapshot),
+  ]);
+  return buildTokenReport(decoded, meta, code);
 }
 
 /**
@@ -328,16 +369,16 @@ async function reportTokens(
 async function recoverRevertViaCall(
   client: ShieldClient,
   tx: ethers.TransactionResponse,
-  blockNumber: number,
+  snapshot: ChainSnapshot,
 ): Promise<DecodedRevert | undefined> {
   try {
-    await client.provider.call({
+    const request: Record<string, string> = {
       from: tx.from,
-      to: tx.to,
       data: tx.data,
-      value: tx.value,
-      blockTag: blockNumber,
-    });
+      value: ethers.toBeHex(tx.value),
+    };
+    if (tx.to) request.to = tx.to;
+    await callAt(client, request, snapshot);
     return undefined; // no revert reproduced
   } catch (err) {
     // ethers surfaces revert data under .data on a CALL_EXCEPTION.

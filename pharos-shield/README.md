@@ -18,10 +18,10 @@ Connect it to your agent and just ask; the agent routes to the right tool:
 
 | Tool | Ask | What it does |
 | --- | --- | --- |
-| `shield_inspect` | "is `0x…` a proxy and who can upgrade it?" | contract vs EOA, EIP-1967 proxy/impl/admin, owner, bytecode traits — from storage |
-| `shield_autopsy` | "why did tx `0x…` fail?" | traces the tx, finds the deepest reverting call, decodes the revert reason |
-| `shield_simulate` | "dry-run this before I sign" | pre-flight via `debug_traceCall`; revert?/token moves/unlimited approvals. Never sends a tx |
-| `shield_probe` | "is the trace API live?" | active network + a live trace-capability check |
+| `shield_inspect` | "map this proxy's controls" | slots, code hashes, owners, multisig/timelock signals, UUPS compatibility |
+| `shield_autopsy` | "why did tx `0x…` fail?" | follows the root-propagated failure and separates caught reverts |
+| `shield_simulate` | "dry-run this before I sign" | pinned pre-flight, native value intents, ERC-compatible call intents |
+| `shield_probe` | "is the trace API live?" | validates chain/genesis/freshness and probes both trace methods |
 
 Reports verified facts ("admin slot = 0x…", "would revert: INSUFFICIENT_OUTPUT"),
 never a SAFE/UNSAFE verdict.
@@ -70,8 +70,9 @@ npm run cli -- probe
 
 ## Notes
 
-- **Mainnet (1672) is the default** and the network of every example. Testnet
-  (688688) is a secondary toggle via `PHAROS_NETWORK=testnet`.
+- **Mainnet (1672) is the default** and the network of every example. Atlantic
+  testnet (688689) is a secondary toggle via `PHAROS_NETWORK=testnet`.
+- Every command rejects wrong-chain RPCs and pins state reads to one block hash.
 - **No keys, read-only.** Shield only calls read RPC methods (`eth_call`,
   `eth_getCode`, `eth_getStorageAt`, `debug_traceCall`, `debug_traceTransaction`).
   It never signs or sends a transaction, so there is nothing to put in `.env`

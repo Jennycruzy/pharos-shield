@@ -22,6 +22,6 @@
     "declaration": false,
     "sourceMap": false
   },
-  "include": ["scripts/**/*.ts", "mcp/**/*.ts"],
+  "include": ["scripts/**/*.ts", "mcp/**/*.ts", "tests/**/*.ts"],
   "exclude": ["node_modules", "dist"]
 }

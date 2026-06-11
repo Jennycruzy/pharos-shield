@@ -152,7 +152,10 @@ export function decodeWithSignature(
   try {
     const body = '0x' + rawData.slice(10);
     const decoded = abi.decode(types, body);
-    // ethers throws on insufficient/over-long data; reaching here = clean decode.
+    // ethers accepts trailing words. Require canonical round-trip equality so a
+    // selector collision with extra payload cannot be mislabeled.
+    const canonical = abi.encode(types, decoded);
+    if (canonical.toLowerCase() !== body.toLowerCase()) return undefined;
     return { name, signature, args: decoded.map((v) => stringifyArg(v)) };
   } catch {
     return undefined; // selector matched but args don't decode -> not a real match

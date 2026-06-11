@@ -10,7 +10,7 @@
  * what the endpoint answered.
  */
 
-import { JsonRpcProvider, Network } from 'ethers';
+import { FetchRequest, JsonRpcProvider, Network } from 'ethers';
 import { loadConfig, type ResolvedConfig } from './config.js';
 
 /** Error raised when the RPC endpoint rejects or fails a request. */
@@ -31,15 +31,26 @@ export class RpcError extends Error {
   }
 }
 
-/** Error raised when a required trace capability is absent on the endpoint. */
-export class TraceUnsupportedError extends Error {
-  constructor(
-    message: string,
-    readonly detail: string,
-  ) {
+/** Raised before command execution when the RPC is not the configured chain. */
+export class ChainValidationError extends Error {
+  constructor(message: string) {
     super(message);
-    this.name = 'TraceUnsupportedError';
+    this.name = 'ChainValidationError';
   }
+}
+
+/** Pharos accepts a raw block hash string, but not the EIP-1898 object form. */
+export type RpcBlockReference = string;
+
+/** One canonical block used for every state read in a command. */
+export interface ChainSnapshot {
+  readonly chainId: number;
+  readonly blockNumber: number;
+  readonly blockNumberHex: string;
+  readonly blockHash: string;
+  readonly timestamp: number;
+  readonly ageSeconds: number;
+  readonly reference: RpcBlockReference;
 }
 
 export interface ShieldClient {
@@ -55,7 +66,9 @@ export interface ShieldClient {
  */
 export function createClient(config: ResolvedConfig = loadConfig()): ShieldClient {
   const staticNetwork = Network.from(config.network.chainId);
-  const provider = new JsonRpcProvider(config.rpcUrl, staticNetwork, {
+  const request = new FetchRequest(config.rpcUrl);
+  request.timeout = config.timeoutMs;
+  const provider = new JsonRpcProvider(request, staticNetwork, {
     staticNetwork,
     // Pharos has no concept of pending-block batching subtleties we rely on;
     // keep batching modest so a single bad call does not poison a batch.
@@ -77,6 +90,140 @@ export function createClient(config: ResolvedConfig = loadConfig()): ShieldClien
   }
 
   return { config, provider, send };
+}
+
+interface RawBlock {
+  number?: string;
+  hash?: string;
+  timestamp?: string;
+}
+
+function parseQuantity(value: string | undefined, label: string): number {
+  if (!value || !/^0x[0-9a-fA-F]+$/.test(value)) {
+    throw new ChainValidationError(`RPC returned an invalid ${label}: ${String(value)}.`);
+  }
+  const parsed = Number(BigInt(value));
+  if (!Number.isSafeInteger(parsed) || parsed < 0) {
+    throw new ChainValidationError(`RPC returned an out-of-range ${label}: ${value}.`);
+  }
+  return parsed;
+}
+
+function validateBlock(block: RawBlock | null, label: string): RawBlock & {
+  number: string;
+  hash: string;
+  timestamp: string;
+} {
+  if (
+    block === null ||
+    !block.number ||
+    !/^0x[0-9a-fA-F]+$/.test(block.number) ||
+    !block.hash ||
+    !/^0x[0-9a-fA-F]{64}$/.test(block.hash) ||
+    !block.timestamp ||
+    !/^0x[0-9a-fA-F]+$/.test(block.timestamp)
+  ) {
+    throw new ChainValidationError(`RPC returned an invalid ${label} block.`);
+  }
+  return {
+    ...block,
+    number: block.number,
+    hash: block.hash.toLowerCase(),
+    timestamp: block.timestamp,
+  };
+}
+
+/**
+ * Validate chain identity, optional genesis identity, and block freshness, then
+ * pin one canonical block hash for all state reads performed by a command.
+ */
+export async function prepareCommand(
+  client: ShieldClient,
+  blockHash?: string,
+): Promise<ChainSnapshot> {
+  const chainIdHex = await client.send<string>('eth_chainId', []);
+  const chainId = parseQuantity(chainIdHex, 'chain ID');
+  if (chainId !== client.config.network.chainId) {
+    throw new ChainValidationError(
+      `RPC chain mismatch: expected Pharos ${client.config.network.name} chain ` +
+        `${client.config.network.chainId}, received ${chainId}. Refusing to label or analyze wrong-chain data.`,
+    );
+  }
+
+  if (client.config.expectedGenesisHash) {
+    const genesis = validateBlock(
+      await client.send<RawBlock | null>('eth_getBlockByNumber', ['0x0', false]),
+      'genesis',
+    );
+    if (genesis.hash !== client.config.expectedGenesisHash.toLowerCase()) {
+      throw new ChainValidationError(
+        `RPC genesis mismatch for chain ${chainId}: expected ` +
+          `${client.config.expectedGenesisHash}, received ${genesis.hash}.`,
+      );
+    }
+  }
+
+  const block = validateBlock(
+    blockHash
+      ? await client.send<RawBlock | null>('eth_getBlockByHash', [blockHash, false])
+      : await client.send<RawBlock | null>('eth_getBlockByNumber', ['latest', false]),
+    blockHash ? `requested ${blockHash}` : 'latest',
+  );
+  if (blockHash && block.hash !== blockHash.toLowerCase()) {
+    throw new ChainValidationError(
+      `RPC returned block ${block.hash} when ${blockHash.toLowerCase()} was requested.`,
+    );
+  }
+
+  const timestamp = parseQuantity(block.timestamp, 'block timestamp');
+  const blockNumber = parseQuantity(block.number, 'block number');
+  const ageSeconds = Math.floor(Date.now() / 1000) - timestamp;
+  if (!blockHash && ageSeconds > client.config.maxBlockAgeSeconds) {
+    throw new ChainValidationError(
+      `Latest block ${block.number} is stale by ${ageSeconds}s; maximum allowed is ` +
+        `${client.config.maxBlockAgeSeconds}s.`,
+    );
+  }
+  if (ageSeconds < -60) {
+    throw new ChainValidationError(
+      `Block ${block.number} timestamp is ${Math.abs(ageSeconds)}s in the future.`,
+    );
+  }
+
+  return {
+    chainId,
+    blockNumber,
+    blockNumberHex: block.number,
+    blockHash: block.hash,
+    timestamp,
+    ageSeconds,
+    reference: block.hash,
+  };
+}
+
+export async function getCodeAt(
+  client: ShieldClient,
+  address: string,
+  snapshot: ChainSnapshot,
+): Promise<string> {
+  return client.send<string>('eth_getCode', [address, snapshot.reference]);
+}
+
+export async function getStorageAt(
+  client: ShieldClient,
+  address: string,
+  slot: string,
+  snapshot: ChainSnapshot,
+): Promise<string> {
+  return client.send<string>('eth_getStorageAt', [address, slot, snapshot.reference]);
+}
+
+export async function callAt(
+  client: ShieldClient,
+  request: Record<string, string>,
+  snapshot: ChainSnapshot,
+): Promise<string> {
+  return client.send<string>('eth_call', [request, snapshot.reference]);
 }
 
 interface NormalizedError {
@@ -119,52 +266,59 @@ export interface TraceCapability {
   traceCall: boolean;
   /** Human-readable note about what was observed (for honest reporting). */
   note: string;
+  /** Canonical block used by the traceCall probe. */
+  block: ChainSnapshot;
 }
 
 /**
- * Live-probe the endpoint's trace support. Does NOT assume — it issues a real
- * debug_traceCall (cheap, no tx needed) and inspects the response. A
- * "method not found" / -32601 means the namespace is disabled.
- *
- * We probe traceCall (always reproducible) and infer traceTransaction from the
- * same namespace availability; callers that specifically need traceTransaction
- * will surface their own error if it differs.
+ * Live-probe both trace methods independently. traceCall uses the pinned block
+ * hash; traceTransaction is attempted only with a supplied real transaction.
+ * Any RPC/transport error is reported as a failed probe, never as support.
  */
 export async function probeTraceSupport(
   client: ShieldClient,
+  knownTransactionHash: string | undefined =
+    client.config.network.traceProbeTransactionHash,
 ): Promise<TraceCapability> {
+  const snapshot = await prepareCommand(client);
   const probeFrom = '0x0000000000000000000000000000000000000001';
+  let traceCall = false;
+  let traceTransaction = false;
+  const notes: string[] = [];
   try {
     // A self-call to a zero-code address: returns a trivial frame if tracing
     // works, and errors with -32601/method-not-found if it does not.
     await client.send('debug_traceCall', [
       { from: probeFrom, to: probeFrom, data: '0x' },
-      'latest',
+      snapshot.reference,
       { tracer: 'callTracer' },
     ]);
-    return {
-      traceTransaction: true,
-      traceCall: true,
-      note: 'debug_traceCall(callTracer) responded; trace namespace is enabled.',
-    };
+    traceCall = true;
+    notes.push('debug_traceCall(callTracer) responded at the pinned block hash.');
   } catch (err) {
-    if (err instanceof RpcError) {
-      // -32601: method not found  => namespace disabled.
-      if (err.code === -32601 || /not found|not available|unsupported/i.test(err.message)) {
-        return {
-          traceTransaction: false,
-          traceCall: false,
-          note: `Trace namespace appears disabled on ${client.config.rpcUrl}: ${err.message}`,
-        };
-      }
-      // -32602 (param error) or similar means the METHOD exists but our probe
-      // args were rejected — namespace is present.
-      return {
-        traceTransaction: true,
-        traceCall: true,
-        note: `debug_traceCall is present (probe returned: ${err.message}).`,
-      };
-    }
-    throw err;
+    notes.push(`debug_traceCall probe failed: ${errorMessage(err)}.`);
   }
+
+  if (knownTransactionHash) {
+    try {
+      await client.send('debug_traceTransaction', [
+        knownTransactionHash,
+        { tracer: 'callTracer' },
+      ]);
+      traceTransaction = true;
+      notes.push('debug_traceTransaction(callTracer) responded for the supplied real transaction.');
+    } catch (err) {
+      notes.push(`debug_traceTransaction probe failed: ${errorMessage(err)}.`);
+    }
+  } else {
+    notes.push(
+      'debug_traceTransaction was not inferred from traceCall; supply a real transaction hash to probe it.',
+    );
+  }
+
+  return { traceTransaction, traceCall, note: notes.join(' '), block: snapshot };
+}
+
+function errorMessage(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
 }

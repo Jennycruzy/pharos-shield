@@ -1,23 +1,22 @@
 /**
- * Token movement & approval decoding — the Tier-1 pre-sign protection layer.
+ * Receipt activity and ERC-compatible call-intent decoding.
  *
  * Two honest sources, no heuristics, no scoring:
  *   - decodeTokenLogs(): actual ERC-20/721 Transfer & Approval EVENTS from a
  *     mined receipt's logs (what truly moved).
- *   - decodeTokenCalls(): intended transfer/transferFrom/approve CALLS read from
- *     a callTracer call tree (what a tx would do, for pre-flight simulation).
+ *   - decodeTokenCalls(): selector-compatible calldata intents. These never
+ *     assert token-standard support or completed movement.
  *
  * Amounts are reported in raw base units. Optional enrichTokenMeta() fetches
  * decimals/symbol via eth_call so the consumer can format — but only when the
  * token actually answers; unknown stays unknown.
  *
- * This is NOT a token risk score. It reports facts: "this call grants 0xSpender
- * an UNLIMITED allowance on 0xToken", "0xA received 2500000 base units of
- * 0xToken". Verdicts are left to the human.
+ * This is NOT a token risk score. Receipt logs and calldata intents remain
+ * separate in the output so callers cannot confuse a selector with movement.
  */
 
 import { AbiCoder, getAddress, ethers } from 'ethers';
-import type { ShieldClient } from './rpc.js';
+import { callAt, getCodeAt, type ChainSnapshot, type ShieldClient } from './rpc.js';
 import type { CallFrame } from './trace.js';
 
 const abi = AbiCoder.defaultAbiCoder();
@@ -59,8 +58,8 @@ export interface TokenTransfer {
   amount?: string;
   /** Token id (ERC-721) — decimal string. */
   tokenId?: string;
-  /** Where the fact came from: a mined event log or a simulated call. */
-  source: 'log' | 'call';
+  /** The fact came from a mined successful receipt log. */
+  source: 'log';
 }
 
 export interface TokenApproval {
@@ -78,12 +77,34 @@ export interface TokenApproval {
   isUnlimited: boolean;
   /** True when amount >= 2^255 (effectively unlimited even if not exact max). */
   isVeryLarge: boolean;
-  source: 'log' | 'call';
+  source: 'log';
+}
+
+export interface ErcCallIntent {
+  target: string;
+  caller: string;
+  signature:
+    | 'transfer(address,uint256)'
+    | 'transferFrom(address,address,uint256)'
+    | 'approve(address,uint256)'
+    | 'setApprovalForAll(address,bool)';
+  kind: 'transfer-intent' | 'approval-intent';
+  from?: string;
+  to?: string;
+  spender?: string;
+  amountOrTokenId?: string;
+  approved?: boolean;
+  isUnlimited: boolean;
+  isVeryLarge: boolean;
+  /** A selector match is not proof that target implements an ERC standard. */
+  standard: 'erc-compatible-unknown';
+  source: 'call-intent';
 }
 
 export interface DecodedTokens {
   transfers: TokenTransfer[];
   approvals: TokenApproval[];
+  callIntents: ErcCallIntent[];
 }
 
 function topicToAddress(topic: string): string {
@@ -186,18 +207,17 @@ export function decodeTokenLogs(logs: ReadonlyArray<LogLike>): DecodedTokens {
     }
   }
 
-  return { transfers, approvals };
+  return { transfers, approvals, callIntents: [] };
 }
 
 /**
- * Decode intended token movements/approvals from a callTracer call tree. Reads
+ * Decode ERC-compatible transfer/approval intents from a call tree. Reads
  * the selector + args of each frame's input. transferFrom's selector is shared
  * by ERC-20 and ERC-721 (identical signature), so its third word is reported as
  * amount-or-tokenId without asserting which.
  */
 export function decodeTokenCalls(frames: ReadonlyArray<CallFrame>): DecodedTokens {
-  const transfers: TokenTransfer[] = [];
-  const approvals: TokenApproval[] = [];
+  const callIntents: ErcCallIntent[] = [];
 
   for (const f of frames) {
     const input = f.input ?? '0x';
@@ -209,59 +229,70 @@ export function decodeTokenCalls(frames: ReadonlyArray<CallFrame>): DecodedToken
     try {
       if (sel === SEL_TRANSFER) {
         const [to, amount] = abi.decode(['address', 'uint256'], body) as unknown as [string, bigint];
-        transfers.push({
-          token,
-          standard: 'erc20',
-          from: getAddress(f.from),
+        callIntents.push({
+          target: token,
+          caller: getAddress(f.from),
+          signature: 'transfer(address,uint256)',
+          kind: 'transfer-intent',
           to: getAddress(to),
-          amount: amount.toString(),
-          source: 'call',
+          amountOrTokenId: amount.toString(),
+          isUnlimited: false,
+          isVeryLarge: false,
+          standard: 'erc-compatible-unknown',
+          source: 'call-intent',
         });
       } else if (sel === SEL_TRANSFER_FROM) {
         const [from, to, value] = abi.decode(
           ['address', 'address', 'uint256'],
           body,
         ) as unknown as [string, string, bigint];
-        // Signature is shared by ERC-20 (amount) and ERC-721 (tokenId).
-        transfers.push({
-          token,
-          standard: 'erc20',
+        callIntents.push({
+          target: token,
+          caller: getAddress(f.from),
+          signature: 'transferFrom(address,address,uint256)',
+          kind: 'transfer-intent',
           from: getAddress(from),
           to: getAddress(to),
-          amount: value.toString(),
-          source: 'call',
+          amountOrTokenId: value.toString(),
+          isUnlimited: false,
+          isVeryLarge: false,
+          standard: 'erc-compatible-unknown',
+          source: 'call-intent',
         });
       } else if (sel === SEL_APPROVE) {
         const [spender, amount] = abi.decode(['address', 'uint256'], body) as unknown as [
           string,
           bigint,
         ];
-        approvals.push({
-          token,
-          standard: 'erc20',
-          owner: getAddress(f.from),
+        const size = classifyApprovalSize(amount);
+        callIntents.push({
+          target: token,
+          caller: getAddress(f.from),
+          signature: 'approve(address,uint256)',
+          kind: 'approval-intent',
           spender: getAddress(spender),
-          amount: amount.toString(),
-          ...classifyApprovalSize(amount),
-          source: 'call',
+          amountOrTokenId: amount.toString(),
+          ...size,
+          standard: 'erc-compatible-unknown',
+          source: 'call-intent',
         });
       } else if (sel === SEL_SET_APPROVAL_FOR_ALL) {
         const [operator, approved] = abi.decode(['address', 'bool'], body) as unknown as [
           string,
           boolean,
         ];
-        if (approved) {
-          approvals.push({
-            token,
-            standard: 'erc721',
-            owner: getAddress(f.from),
-            spender: getAddress(operator),
-            operatorAll: true,
-            isUnlimited: true,
-            isVeryLarge: true,
-            source: 'call',
-          });
-        }
+        callIntents.push({
+          target: token,
+          caller: getAddress(f.from),
+          signature: 'setApprovalForAll(address,bool)',
+          kind: 'approval-intent',
+          spender: getAddress(operator),
+          approved,
+          isUnlimited: approved,
+          isVeryLarge: approved,
+          standard: 'erc-compatible-unknown',
+          source: 'call-intent',
+        });
       }
     } catch {
       // Malformed args — skip this frame rather than guess.
@@ -269,7 +300,7 @@ export function decodeTokenCalls(frames: ReadonlyArray<CallFrame>): DecodedToken
     }
   }
 
-  return { transfers, approvals };
+  return { transfers: [], approvals: [], callIntents };
 }
 
 export interface TokenMeta {
@@ -285,6 +316,7 @@ export interface TokenMeta {
 export async function enrichTokenMeta(
   client: ShieldClient,
   tokenAddresses: ReadonlyArray<string>,
+  snapshot: ChainSnapshot,
 ): Promise<Map<string, TokenMeta>> {
   const unique = [...new Set(tokenAddresses.map((a) => getAddress(a)))];
   const out = new Map<string, TokenMeta>();
@@ -294,7 +326,7 @@ export async function enrichTokenMeta(
       const meta: TokenMeta = {};
       // decimals() = 0x313ce567
       try {
-        const d = await client.provider.call({ to: token, data: '0x313ce567' });
+        const d = await callAt(client, { to: token, data: '0x313ce567' }, snapshot);
         if (d && d !== '0x') {
           const n = Number(BigInt(d));
           if (Number.isInteger(n) && n >= 0 && n <= 255) meta.decimals = n;
@@ -304,7 +336,7 @@ export async function enrichTokenMeta(
       }
       // symbol() = 0x95d89b41
       try {
-        const s = await client.provider.call({ to: token, data: '0x95d89b41' });
+        const s = await callAt(client, { to: token, data: '0x95d89b41' }, snapshot);
         if (s && s !== '0x') {
           const sym = decodeStringReturn(s);
           if (sym) meta.symbol = sym;
@@ -338,7 +370,7 @@ export interface TokenTransferReport {
   to: string;
   /** Human-formatted amount (decimals applied when known) or token id. */
   amount: string;
-  source: 'log' | 'call';
+  source: 'log';
 }
 
 export interface TokenApprovalReport {
@@ -351,12 +383,22 @@ export interface TokenApprovalReport {
   isUnlimited: boolean;
   isVeryLarge: boolean;
   operatorAll: boolean;
-  source: 'log' | 'call';
+  source: 'log';
+}
+
+export interface ErcCallIntentReport extends ErcCallIntent {
+  targetHasCode: boolean;
+  targetSymbol?: string;
+  displayAmount?: string;
 }
 
 export interface TokenReport {
+  /** Actual event-log-backed movements from a mined successful transaction. */
   transfers: TokenTransferReport[];
+  /** Actual event-log-backed approvals from a mined successful transaction. */
   approvals: TokenApprovalReport[];
+  /** Selector-derived intent only; never represented as an actual movement. */
+  callIntents: ErcCallIntentReport[];
   /** Human-readable flags (e.g. unlimited-approval warnings). Facts, not scores. */
   notes: string[];
 }
@@ -366,6 +408,7 @@ export function tokenAddressesOf(d: DecodedTokens): string[] {
   const s = new Set<string>();
   for (const t of d.transfers) s.add(t.token);
   for (const a of d.approvals) s.add(a.token);
+  for (const intent of d.callIntents) s.add(intent.target);
   return [...s];
 }
 
@@ -376,6 +419,7 @@ export function tokenAddressesOf(d: DecodedTokens): string[] {
 export function buildTokenReport(
   d: DecodedTokens,
   meta: Map<string, TokenMeta>,
+  codeByAddress: Map<string, boolean> = new Map(),
 ): TokenReport {
   const notes: string[] = [];
 
@@ -430,7 +474,48 @@ export function buildTokenReport(
     };
   });
 
-  return { transfers, approvals, notes };
+  const callIntents: ErcCallIntentReport[] = d.callIntents.map((intent) => {
+    const m = meta.get(intent.target);
+    const displayAmount =
+      intent.amountOrTokenId === undefined
+        ? undefined
+        : formatAmount(intent.amountOrTokenId, m);
+    if (intent.isUnlimited) {
+      notes.push(
+        `ERC-compatible call intent would request an unlimited approval for ` +
+          `${intent.spender ?? '(unknown spender)'} on target ${intent.target}.`,
+      );
+    }
+    return {
+      ...intent,
+      targetHasCode: codeByAddress.get(intent.target) ?? false,
+      ...(m?.symbol ? { targetSymbol: m.symbol } : {}),
+      ...(displayAmount ? { displayAmount } : {}),
+    };
+  });
+
+  if (callIntents.length > 0) {
+    notes.push(
+      'ERC-compatible call intents are selector-derived calldata interpretations, not proof of token-standard support or completed movement.',
+    );
+  }
+
+  return { transfers, approvals, callIntents, notes };
+}
+
+export async function readCodePresence(
+  client: ShieldClient,
+  addresses: ReadonlyArray<string>,
+  snapshot: ChainSnapshot,
+): Promise<Map<string, boolean>> {
+  const out = new Map<string, boolean>();
+  await Promise.all(
+    [...new Set(addresses.map((address) => getAddress(address)))].map(async (address) => {
+      const code = await getCodeAt(client, address, snapshot);
+      out.set(address, code !== '0x');
+    }),
+  );
+  return out;
 }
 
 /** ABI-decode a string return, falling back to bytes32-style symbols. */

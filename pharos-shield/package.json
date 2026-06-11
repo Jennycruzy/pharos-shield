@@ -8,7 +8,8 @@
     "pharos-shield-mcp": "dist/mcp/server.js"
   },
   "files": [
-    "dist",
+    "dist/scripts",
+    "dist/mcp",
     "scripts/connect.mjs",
     "SKILL.md",
     "AGENTS.md",
@@ -19,6 +20,10 @@
     "build": "tsc",
     "prepare": "npm run build",
     "typecheck": "tsc --noEmit",
+    "test": "npm run test:unit && npm run test:mcp",
+    "test:unit": "node --import tsx --test tests/unit/*.test.ts",
+    "test:mcp": "node --import tsx --test tests/mcp/*.test.ts",
+    "test:live": "node --import tsx --test tests/integration/*.test.ts",
     "cli": "node --import tsx scripts/cli.ts",
     "mcp": "node --import tsx mcp/server.ts",
     "mcp:http": "node --import tsx mcp/server.ts --http",

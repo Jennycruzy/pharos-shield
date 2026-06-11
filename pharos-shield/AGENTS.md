@@ -14,18 +14,21 @@ the MCP server, and installs the skill. For a specific MCP client instead, run
 ## Commands
 
 - `simulate` — pre-flight a tx via `debug_traceCall`; reports revert/no-revert,
-  call tree, native PROS movements, and ERC-20/721 token movements + approvals
-  (flags UNLIMITED approvals before signing). Never sends a transaction.
+	  call tree, native PROS value intents, and ERC-compatible calldata intents
+	  (flags UNLIMITED approval requests). Never sends a transaction.
 - `autopsy <txhash>` — diagnose a failed tx via `debug_traceTransaction`
-  (callTracer): deepest reverting call + decoded revert + probable cause, plus
-  real (succeeded) or attempted (failed) token movements from logs/trace.
+  (callTracer): root-propagated reverting call + caught-error separation +
+  decoded revert + probable cause, plus
+	  real succeeded activity from receipt logs and separate selector-derived call
+	  intents for failed traces.
 - Both `simulate` and `autopsy` resolve raw 4-byte function/custom-error
   selectors via the openchain.xyz signature DB (`scripts/signatures.ts`). A
   named custom error is applied only when its args actually decode against the
   payload (no coincidental-collision mislabels). Sourcify is not used — it does
   not index chain 1672 (verified), so no verified ABI is ever claimed.
 - `inspect <address>` — contract vs EOA, EIP-1967 proxy/impl/admin + EIP-1167
-  minimal-proxy + beacon resolution, PUSH-aware bytecode scan
+	  minimal-proxy + beacon resolution, a control graph (code hashes, reported
+	  owners, Safe thresholds, timelocks, UUPS compatibility), PUSH-aware bytecode scan
   (DELEGATECALL/SELFDESTRUCT/CREATE2), and live owner()/paused()/token-metadata/
   ERC-165 reads. Reports only what storage proves or the chain answers.
 
@@ -55,14 +58,15 @@ npm run mcp:http      # Streamable HTTP on http://127.0.0.1:8731/mcp
 
 ## Hard rules for any agent using/extending this
 
-1. **Mainnet (1672) is the default and the network of every claim/demo.** Testnet
-   (688688) is a secondary toggle via `PHAROS_NETWORK=testnet` and its public RPC
-   is unconfirmed.
+1. **Mainnet (1672) is the default and the network of every claim/demo.** Atlantic
+   testnet (688689) is a secondary toggle via `PHAROS_NETWORK=testnet`.
 2. **Never fabricate output.** Every result must come from a real RPC call. If a
    capability is unavailable, degrade and label it — do not fake it.
 3. **Report verified facts, not verdicts.** "admin slot = 0x…", "would revert:
    <reason>", "cause undetermined" — never a green "SAFE" badge.
-4. Default mainnet RPC `https://rpc.pharos.xyz` is confirmed to expose
+4. Every command validates chain ID, verifies mainnet genesis, checks freshness,
+   and pins state reads to one block hash. Default mainnet RPC
+   `https://rpc.pharos.xyz` is confirmed to expose
    `debug_traceCall` / `debug_traceTransaction` with `callTracer`. Pharos returns
    top-level reverts in `debug_traceCall` as JSON-RPC error code 3 with revert
    data in `error.data` (handled in `scripts/simulate.ts`).

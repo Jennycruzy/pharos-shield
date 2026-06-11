@@ -9,7 +9,7 @@
  */
 
 import { AbiCoder, getAddress, ethers } from 'ethers';
-import type { ShieldClient } from './rpc.js';
+import { callAt, type ChainSnapshot, type ShieldClient } from './rpc.js';
 
 const abi = AbiCoder.defaultAbiCoder();
 
@@ -38,9 +38,10 @@ async function rawCall(
   client: ShieldClient,
   to: string,
   data: string,
+  snapshot: ChainSnapshot,
 ): Promise<string | undefined> {
   try {
-    const res = await client.provider.call({ to, data });
+    const res = await callAt(client, { to, data }, snapshot);
     return res && res !== '0x' ? res : undefined;
   } catch {
     return undefined; // function absent / reverted — trait not present
@@ -51,8 +52,9 @@ async function readAddress(
   client: ShieldClient,
   to: string,
   selector: string,
+  snapshot: ChainSnapshot,
 ): Promise<string | undefined> {
-  const res = await rawCall(client, to, selector);
+  const res = await rawCall(client, to, selector, snapshot);
   if (!res) return undefined;
   try {
     const [addr] = abi.decode(['address'], res) as unknown as [string];
@@ -68,8 +70,9 @@ async function readBool(
   client: ShieldClient,
   to: string,
   selector: string,
+  snapshot: ChainSnapshot,
 ): Promise<boolean | undefined> {
-  const res = await rawCall(client, to, selector);
+  const res = await rawCall(client, to, selector, snapshot);
   if (!res) return undefined;
   try {
     const [b] = abi.decode(['bool'], res) as unknown as [boolean];
@@ -83,8 +86,9 @@ async function readUint(
   client: ShieldClient,
   to: string,
   selector: string,
+  snapshot: ChainSnapshot,
 ): Promise<bigint | undefined> {
-  const res = await rawCall(client, to, selector);
+  const res = await rawCall(client, to, selector, snapshot);
   if (!res) return undefined;
   try {
     const [n] = abi.decode(['uint256'], res) as unknown as [bigint];
@@ -98,8 +102,9 @@ async function readString(
   client: ShieldClient,
   to: string,
   selector: string,
+  snapshot: ChainSnapshot,
 ): Promise<string | undefined> {
-  const res = await rawCall(client, to, selector);
+  const res = await rawCall(client, to, selector, snapshot);
   if (!res) return undefined;
   try {
     const [s] = abi.decode(['string'], res) as unknown as [string];
@@ -129,12 +134,13 @@ export interface ContractTraits {
 export async function readTraits(
   client: ShieldClient,
   address: string,
+  snapshot: ChainSnapshot,
 ): Promise<ContractTraits> {
   const [owner, getOwner, paused, implementation] = await Promise.all([
-    readAddress(client, address, SEL_OWNER),
-    readAddress(client, address, SEL_GET_OWNER),
-    readBool(client, address, SEL_PAUSED),
-    readAddress(client, address, SEL_IMPLEMENTATION),
+    readAddress(client, address, SEL_OWNER, snapshot),
+    readAddress(client, address, SEL_GET_OWNER, snapshot),
+    readBool(client, address, SEL_PAUSED, snapshot),
+    readAddress(client, address, SEL_IMPLEMENTATION, snapshot),
   ]);
   const traits: ContractTraits = {};
   const resolvedOwner = owner ?? getOwner;
@@ -155,12 +161,13 @@ export interface TokenInfo {
 export async function readTokenInfo(
   client: ShieldClient,
   address: string,
+  snapshot: ChainSnapshot,
 ): Promise<TokenInfo> {
   const [name, symbol, decimals, totalSupply] = await Promise.all([
-    readString(client, address, SEL_NAME),
-    readString(client, address, SEL_SYMBOL),
-    readUint(client, address, SEL_DECIMALS),
-    readUint(client, address, SEL_TOTAL_SUPPLY),
+    readString(client, address, SEL_NAME, snapshot),
+    readString(client, address, SEL_SYMBOL, snapshot),
+    readUint(client, address, SEL_DECIMALS, snapshot),
+    readUint(client, address, SEL_TOTAL_SUPPLY, snapshot),
   ]);
   const info: TokenInfo = {};
   if (name) info.name = name;
@@ -179,10 +186,11 @@ export async function readTokenInfo(
 export async function readInterfaces(
   client: ShieldClient,
   address: string,
+  snapshot: ChainSnapshot,
 ): Promise<string[]> {
   const supports = async (id: string): Promise<boolean> => {
     const data = SEL_SUPPORTS_INTERFACE + id.replace(/^0x/, '').padEnd(64, '0');
-    const b = await readBool(client, address, data);
+    const b = await readBool(client, address, data, snapshot);
     return b === true;
   };
 
@@ -203,6 +211,7 @@ export async function readInterfaces(
 export async function resolveBeaconImplementation(
   client: ShieldClient,
   beacon: string,
+  snapshot: ChainSnapshot,
 ): Promise<string | undefined> {
-  return readAddress(client, beacon, SEL_IMPLEMENTATION);
+  return readAddress(client, beacon, SEL_IMPLEMENTATION, snapshot);
 }
