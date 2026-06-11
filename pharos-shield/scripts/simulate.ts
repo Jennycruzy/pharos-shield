@@ -1,7 +1,8 @@
 /**
  * simulate <tx params> — PRE-FLIGHT dry-run.
  *
- * Builds a call object and runs debug_traceCall at one pinned latest-block hash. Reports
+ * Builds a call object and runs debug_traceCall at one quorum-checked,
+ * confirmation-depth block hash. Reports
  * whether it would succeed or revert, the would-be call tree, and native-value
  * call intents visible in the trace. It NEVER sends a transaction.
  *
@@ -11,8 +12,13 @@
  */
 
 import { ethers, getAddress } from 'ethers';
-import type { ChainSnapshot, ShieldClient } from './rpc.js';
-import { prepareCommand, RpcError } from './rpc.js';
+import type { BlockAnchor, ChainSnapshot, ShieldClient } from './rpc.js';
+import {
+  blockAnchor,
+  finalizeCommandResult,
+  prepareCommand,
+  RpcError,
+} from './rpc.js';
 import {
   traceCall,
   flatten,
@@ -68,7 +74,7 @@ export interface SimulateResult {
   isSimulation: true; // always — Shield never sends
   from: string;
   to: string | undefined;
-  block: Pick<ChainSnapshot, 'blockNumber' | 'blockHash' | 'timestamp'>;
+  block: BlockAnchor;
   willRevert: boolean;
   callCount: number;
   revert?: DecodedRevert;
@@ -141,11 +147,7 @@ export async function simulate(
   }
 
   const snapshot = await prepareCommand(client);
-  const block = {
-    blockNumber: snapshot.blockNumber,
-    blockHash: snapshot.blockHash,
-    timestamp: snapshot.timestamp,
-  };
+  const block = blockAnchor(snapshot);
 
   const request: TraceCallRequest = { from, data };
   if (to !== undefined) request.to = to;
@@ -174,7 +176,7 @@ export async function simulate(
         input: request.data ?? '0x',
       };
       const tokens = await computeTokenReport(client, [syntheticFrame], snapshot);
-      return {
+      return finalizeCommandResult(client, snapshot, {
         network: client.config.network.name,
         isSimulation: true,
         from,
@@ -192,7 +194,7 @@ export async function simulate(
           'Pharos reported the revert as an RPC error (no call tree returned for top-level reverts).',
           ...tokens.notes,
         ],
-      };
+      });
     }
     throw err;
   }
@@ -251,7 +253,7 @@ export async function simulate(
   }
   notes.push(...tokens.notes);
 
-  return {
+  return finalizeCommandResult(client, snapshot, {
     network: client.config.network.name,
     isSimulation: true,
     from,
@@ -264,7 +266,7 @@ export async function simulate(
     nativeValueIntents: formattedValueIntents,
     tokens,
     notes,
-  };
+  });
 }
 
 /** Resolve raw 4-byte selectors in a SimCall list to function names (batched). */
@@ -316,6 +318,11 @@ export function formatSimulate(r: SimulateResult): string {
   lines.push(`From:      ${r.from}`);
   lines.push(`To:        ${r.to ?? '(contract creation)'}`);
   lines.push(`Block:     ${r.block.blockNumber} (${r.block.blockHash})`);
+  lines.push(
+    `Finality:  ${r.block.confirmations} confirmation(s); ` +
+      `${r.block.consensus.agreeing}/${r.block.consensus.total} RPC agreement ` +
+      `(${r.block.consensus.mode})`,
+  );
   lines.push(`Outcome:   ${r.willRevert ? 'WOULD REVERT' : 'would succeed'}`);
   if (r.revert) lines.push(`Revert:    ${r.revert.reason}`);
   lines.push(`Calls:     ${r.callCount} frame(s)`);

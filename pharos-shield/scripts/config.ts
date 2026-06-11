@@ -98,12 +98,46 @@ function parseNetwork(raw: string | undefined): NetworkName {
 
 export interface ResolvedConfig {
   readonly network: NetworkConfig;
+  /** Primary RPC first, followed by independent quorum endpoints. */
+  readonly rpcUrls: readonly string[];
   readonly rpcUrl: string;
   readonly timeoutMs: number;
   /** Maximum acceptable age of the pinned latest block. */
   readonly maxBlockAgeSeconds: number;
+  /** Minimum endpoints that must agree on the canonical block hash. */
+  readonly quorumMinimum: number;
+  /** Number of confirmations behind the slowest healthy tip for latest-state commands. */
+  readonly finalityConfirmations: number;
+  /** Maximum permitted height difference between healthy RPC tips. */
+  readonly maxTipSkew: number;
   /** Optional operator override for private deployments or future networks. */
   readonly expectedGenesisHash?: string;
+}
+
+function parseNonNegativeInteger(
+  raw: string | undefined,
+  fallback: number,
+  label: string,
+): number {
+  if (raw === undefined || raw.trim() === '') return fallback;
+  const parsed = Number(raw);
+  if (!Number.isSafeInteger(parsed) || parsed < 0) {
+    throw new Error(`${label}="${raw}" must be a non-negative integer.`);
+  }
+  return parsed;
+}
+
+function validateRpcUrl(value: string, label: string): string {
+  let parsed: URL;
+  try {
+    parsed = new URL(value);
+  } catch {
+    throw new Error(`${label} contains an invalid URL: "${value}".`);
+  }
+  if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') {
+    throw new Error(`${label} must use http:// or https://.`);
+  }
+  return value;
 }
 
 /**
@@ -123,6 +157,13 @@ export function loadConfig(
     rpcOverride && rpcOverride.trim() !== ''
       ? rpcOverride.trim()
       : network.rpcUrl;
+  validateRpcUrl(rpcUrl, 'Primary RPC');
+  const quorumOverrides = (env.PHAROS_RPC_QUORUM_URLS ?? '')
+    .split(',')
+    .map((value) => value.trim())
+    .filter((value) => value !== '')
+    .map((value) => validateRpcUrl(value, 'PHAROS_RPC_QUORUM_URLS'));
+  const rpcUrls = [...new Set([rpcUrl, ...quorumOverrides])];
 
   let timeoutMs = 20_000;
   const rawTimeout = env.PHAROS_RPC_TIMEOUT_MS;
@@ -148,6 +189,33 @@ export function loadConfig(
     maxBlockAgeSeconds = parsed;
   }
 
+  const defaultQuorumMinimum =
+    rpcUrls.length === 1 ? 1 : Math.floor(rpcUrls.length / 2) + 1;
+  const quorumMinimum = parseNonNegativeInteger(
+    env.PHAROS_RPC_QUORUM_MIN,
+    defaultQuorumMinimum,
+    'PHAROS_RPC_QUORUM_MIN',
+  );
+  if (
+    quorumMinimum < 1 ||
+    quorumMinimum > rpcUrls.length ||
+    (rpcUrls.length > 1 && quorumMinimum < 2)
+  ) {
+    throw new Error(
+      `PHAROS_RPC_QUORUM_MIN must be between ${rpcUrls.length > 1 ? 2 : 1} and ${rpcUrls.length}.`,
+    );
+  }
+  const finalityConfirmations = parseNonNegativeInteger(
+    env.PHAROS_FINALITY_CONFIRMATIONS,
+    2,
+    'PHAROS_FINALITY_CONFIRMATIONS',
+  );
+  const maxTipSkew = parseNonNegativeInteger(
+    env.PHAROS_RPC_MAX_TIP_SKEW,
+    5,
+    'PHAROS_RPC_MAX_TIP_SKEW',
+  );
+
   const genesisOverride = env.PHAROS_GENESIS_HASH?.trim();
   if (
     genesisOverride !== undefined &&
@@ -165,9 +233,13 @@ export function loadConfig(
 
   return {
     network,
+    rpcUrls,
     rpcUrl,
     timeoutMs,
     maxBlockAgeSeconds,
+    quorumMinimum,
+    finalityConfirmations,
+    maxTipSkew,
     ...(expectedGenesisHash ? { expectedGenesisHash } : {}),
   };
 }

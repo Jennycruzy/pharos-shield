@@ -20,8 +20,8 @@ from on-chain facts only.
   and the network of **every example and output below**. Atlantic testnet
   (688689) is a secondary toggle only.
 - **Identity and consistency:** every command validates `eth_chainId`, verifies
-  the known mainnet genesis hash, rejects stale latest blocks, and pins all
-  state reads to one block hash.
+  the known mainnet genesis hash, rejects stale/divergent RPCs, pins all state
+  reads to a confirmation-depth block hash, and rechecks it after analysis.
 - **No mock production paths or example outputs.** Every example in this README
   is a real mainnet RPC call against a real contract/transaction. Unit tests use
   isolated deterministic test doubles for transport failures and pure decoding
@@ -74,16 +74,17 @@ prints ready-to-paste config. Full details in
 8. [`simulate` — pre-flight dry-run](#simulate--pre-flight-dry-run)
 9. [Receipt activity & ERC-compatible call intents](#receipt-activity--erc-compatible-call-intents)
 10. [`probe` — capability check](#probe--capability-check)
-11. [Composable workflows](#composable-workflows)
-12. [Suggested demo (≈90 s)](#suggested-demo-90s)
-13. [Using Shield from an AI agent (MCP)](#using-shield-from-an-ai-agent-mcp)
-14. [Output reference (JSON fields)](#output-reference-json-fields)
-15. [Building calldata for `simulate`](#building-calldata-for-simulate)
-16. [Current build verification](#current-build-verification)
-17. [Verified on-chain artifacts](#verified-on-chain-artifacts)
-18. [Verified-vs-degraded status](#verified-vs-degraded-status)
-19. [Troubleshooting](#troubleshooting)
-20. [Configuration, safety policy, dependencies](#network-configuration)
+11. [RPC quorum, finality & signed evidence](#rpc-quorum-finality--signed-evidence)
+12. [Composable workflows](#composable-workflows)
+13. [Suggested demo (≈90 s)](#suggested-demo-90s)
+14. [Using Shield from an AI agent (MCP)](#using-shield-from-an-ai-agent-mcp)
+15. [Output reference (JSON fields)](#output-reference-json-fields)
+16. [Building calldata for `simulate`](#building-calldata-for-simulate)
+17. [Current build verification](#current-build-verification)
+18. [Verified on-chain artifacts](#verified-on-chain-artifacts)
+19. [Verified-vs-degraded status](#verified-vs-degraded-status)
+20. [Troubleshooting](#troubleshooting)
+21. [Configuration, safety policy, dependencies](#network-configuration)
 
 ---
 
@@ -555,6 +556,42 @@ Note:     debug_traceCall responded at the pinned block hash; debug_traceTransac
 
 ---
 
+## RPC quorum, finality & signed evidence
+
+The built-in mainnet configuration has one publicly verified trace RPC, so it
+honestly reports `single-endpoint`. Add independent providers to enable quorum:
+
+```bash
+export PHAROS_RPC_QUORUM_URLS="https://second-rpc.example,https://third-rpc.example"
+export PHAROS_RPC_QUORUM_MIN=2
+export PHAROS_FINALITY_CONFIRMATIONS=2
+export PHAROS_RPC_MAX_TIP_SKEW=5
+```
+
+Shield validates chain ID, genesis, freshness and tip skew on every configured
+endpoint. It selects the block at `slowest healthy tip - confirmations`, requires
+the primary hash to meet quorum, pins all reads to that hash, then rechecks the
+same height after analysis. Historical transaction blocks are checked against
+the canonical hash at their height and marked with their confirmation count.
+`meetsFinalityPolicy` means the configured confirmation threshold was reached;
+it is not a claim about protocol-level irreversible finality.
+
+Signed evidence is opt-in and uses a **separate attestation key**, never a wallet
+transaction key:
+
+```bash
+export PHAROS_EVIDENCE_SIGNING_KEY=0x<separate-32-byte-key>
+npm run cli -- inspect 0xContract --evidence shield-evidence.json
+npm run cli -- verify-evidence shield-evidence.json
+```
+
+The `pharos-shield-evidence/v1` bundle contains the complete result, canonical
+block and quorum metadata, result hash, contract code hashes read at that block,
+signer address and EIP-191 signature. MCP callers request the same bundle with
+`includeEvidence: true`.
+
+---
+
 ## Composable workflows
 
 The three commands share one core and chain naturally:
@@ -628,10 +665,10 @@ no logic is reimplemented.
 
 | MCP tool | Arguments | Returns |
 | --- | --- | --- |
-| `shield_inspect` | `{ address }` | inspect result (JSON) |
-| `shield_autopsy` | `{ txhash }` | autopsy result (JSON) |
-| `shield_simulate` | `{ from, to?, data?, value?, gas? }` | simulate result (JSON) |
-| `shield_probe` | `{}` | network + live trace capability |
+| `shield_inspect` | `{ address, includeEvidence? }` | inspect result or signed bundle |
+| `shield_autopsy` | `{ txhash, includeEvidence? }` | autopsy result or signed bundle |
+| `shield_simulate` | `{ from, to?, data?, value?, gas?, includeEvidence? }` | simulate result or signed bundle |
+| `shield_probe` | `{ includeEvidence? }` | network/trace result or signed bundle |
 
 ### Talk to it in plain English from any agent CLI
 
@@ -736,7 +773,7 @@ Use `--json` for these shapes (text mode is a formatted view of the same data).
 | `traits` | object? | live `{ owner?, paused?, implementation? }` |
 | `token` | object? | `{ name?, symbol?, decimals?, totalSupply? }` |
 | `interfaces` | string[]? | ERC-165 interfaces declared (e.g. `ERC-721`) |
-| `block` | object | pinned block number/hash/timestamp used for state reads |
+| `block` | object | pinned number/hash/timestamp, confirmations, finality and RPC consensus |
 | `notes` | string[] | evidence and limitations behind the result |
 
 ### `autopsy`
@@ -782,6 +819,17 @@ receipt events. `callIntents` use `source: "call-intent"` and never assert
 standard support or completed movement. Amount metadata is read at the same
 pinned block hash.
 
+### Signed evidence
+
+| Field | Meaning |
+| --- | --- |
+| `payload.schema` | `pharos-shield-evidence/v1` |
+| `payload.block` | canonical block plus confirmation/quorum observations |
+| `payload.result` / `resultHash` | complete command result and canonical JSON hash |
+| `payload.codeHashes[]` | contract address, bytecode hash and size at the same block |
+| `signing.signer` | recovered secp256k1 evidence signer |
+| `signing.payloadHash` / `signature` | canonical payload commitment and EIP-191 signature |
+
 ---
 
 ## Building calldata for `simulate`
@@ -824,9 +872,11 @@ Trace:    traceCall=true traceTransaction=true
 Note:     both methods responded; traceTransaction used a real mainnet tx.
 ```
 
-Unit tests cover wrong chains, stale/outage probes, selector intent semantics,
-signature collisions, rollback accounting, propagated vs caught reverts, and
-proxy control graphs. MCP transports are exercised end-to-end: `initialize` →
+Unit tests cover wrong chains, stale/outage probes, RPC quorum disagreement,
+post-command reorg detection, signed-evidence tampering, selector intent
+semantics, signature collisions, rollback accounting, propagated vs caught
+reverts, and proxy control graphs. `fast-check` property suites run randomized
+calldata, revert and proxy-slot decoder invariants. MCP transports are exercised end-to-end: `initialize` →
 `tools/list` (returns `shield_inspect`, `shield_autopsy`, `shield_simulate`,
 `shield_probe`) → `tools/call` returning real on-chain data, over **both** stdio
 and Streamable HTTP. A scheduled GitHub Actions job runs the real mainnet suite.
@@ -873,6 +923,10 @@ Everything here was probed against live Pharos mainnet on 2026-06-11.
 | Mainnet genesis | **Confirmed** | block 0 hash `0x9695a707…670929f` |
 | Wrong-chain rejection | **Confirmed** | Ethereum chain 1 override is rejected before analysis |
 | Block-hash pinning | **Confirmed** | Pharos accepts raw block hashes for code/storage/call/trace reads |
+| Confirmation-depth checkpoint | **Confirmed** | live commands execute against a canonical block behind the current tip |
+| Single-endpoint reorg post-check | **Confirmed** | the pinned height is re-read before returning |
+| Independent multi-RPC quorum | **Configurable** | requires operator-supplied independent endpoints; no second public trace RPC is assumed |
+| Signed evidence | **Confirmed locally** | secp256k1/EIP-191 bundles verify and reject result tampering |
 | `debug_traceTransaction` (callTracer) | **Confirmed** | Returns a call frame for real failed txs (see autopsy examples) |
 | `debug_traceCall` (callTracer) | **Confirmed** | Returns a frame; requires a `from` field |
 | `eth_getCode` / `eth_getStorageAt` | **Confirmed** | EIP-1967 slot reads verified against real proxies |
@@ -897,6 +951,8 @@ command reports that honestly rather than faking a trace.
 | `probe` shows `traceCall=false` | RPC has `debug_*` disabled | Point `PHAROS_MAINNET_RPC` at a trace-enabled endpoint |
 | `RPC chain mismatch` | RPC override points at another chain | Use a Pharos chain-1672 endpoint |
 | `Latest block ... is stale` | endpoint is lagging | Switch RPC or adjust `PHAROS_MAX_BLOCK_AGE_SECONDS` deliberately |
+| `RPC quorum unavailable` | too few configured peers answered validly | Restore peers or lower the threshold only after reviewing the trust impact |
+| `block disagreement/reorg detected` | RPCs disagree on the canonical hash | Stop and retry after providers converge; do not use the result as evidence |
 | `autopsy` says `Status: NOT FOUND` | Wrong network or wrong hash | Check the hash; confirm `PHAROS_NETWORK` matches the tx's chain |
 | `autopsy` shows `degraded: no trace available` | Trace namespace unavailable on this RPC | Use a trace-enabled RPC; receipt-level facts are still reported |
 | `simulate` errors with `from is needed` | `--from` omitted | Pharos requires a sender for `debug_traceCall`; pass `--from` |
@@ -916,9 +972,14 @@ Environment variables (see `.env.example`):
 
 - `PHAROS_NETWORK` — `mainnet` (default) or `testnet`
 - `PHAROS_MAINNET_RPC` / `PHAROS_TESTNET_RPC` — override RPC URLs
+- `PHAROS_RPC_QUORUM_URLS` — comma-separated independent peers
+- `PHAROS_RPC_QUORUM_MIN` — required agreeing endpoints (majority by default)
+- `PHAROS_FINALITY_CONFIRMATIONS` — checkpoint depth (default 2)
+- `PHAROS_RPC_MAX_TIP_SKEW` — allowed healthy-tip height spread (default 5)
 - `PHAROS_RPC_TIMEOUT_MS` — request timeout (default 20000)
 - `PHAROS_MAX_BLOCK_AGE_SECONDS` — freshness limit (mainnet default 300)
 - `PHAROS_GENESIS_HASH` — optional expected-genesis override
+- `PHAROS_EVIDENCE_SIGNING_KEY` — separate 32-byte evidence-only signing key
 - `PHAROS_SHIELD_HTTP_HOST` — HTTP bind host (default `127.0.0.1`)
 - `PHAROS_SHIELD_HTTP_TOKEN` — bearer token; required for non-loopback binding
 - `PHAROS_SHIELD_HTTP_MAX_SESSIONS` / `PHAROS_SHIELD_HTTP_SESSION_IDLE_MS`
@@ -935,8 +996,11 @@ Environment variables (see `.env.example`):
 3. **Mainnet is the source of truth.** Every example here is mainnet (1672).
 4. **Wrong chains are rejected.** Chain ID and mainnet genesis are checked
    before command results are labeled.
-5. **One block per result.** State reads use the same pinned block hash.
-6. **Pre-flight is read-only.** `simulate` uses `debug_traceCall`; it never
+5. **One canonical block per result.** State reads use the same quorum-checked
+   block hash, which is rechecked after analysis.
+6. **Evidence keys do not transact.** Evidence signing is opt-in and never
+   broadcasts or authorizes an on-chain operation.
+7. **Pre-flight is read-only.** `simulate` uses `debug_traceCall`; it never
    broadcasts a transaction.
 
 ---
@@ -948,6 +1012,8 @@ Environment variables (see `.env.example`):
 - [`@modelcontextprotocol/sdk`](https://www.npmjs.com/package/@modelcontextprotocol/sdk)
   — MCP server (stdio + Streamable HTTP).
 - [`zod`](https://www.npmjs.com/package/zod) — MCP tool input schemas.
+- [`fast-check`](https://www.npmjs.com/package/fast-check) — randomized decoder
+  property tests (development only).
 - TypeScript (`strict: true`, `exactOptionalPropertyTypes`), `tsx` for running.
 
 ## Project layout
@@ -960,10 +1026,11 @@ pharos-shield/
     ├── package.json / tsconfig.json / .env.example
     ├── scripts/
     │   ├── config.ts     # networks, verified RPC URLs, EIP-1967 slots
-    │   ├── rpc.ts        # provider + live trace-capability probe + typed errors
+    │   ├── rpc.ts        # RPC quorum, finality, reorg checks, pinned reads
     │   ├── trace.ts      # callTracer core (traceCall / traceTransaction)
     │   ├── decode.ts     # revert + calldata decoding (Error/Panic/custom)
     │   ├── signatures.ts # openchain signature-DB lookup + decode-confirmed naming
+    │   ├── evidence.ts   # canonical JSON hashing, code hashes, EIP-191 signatures
     │   ├── tokens.ts     # ERC-20/721 movement & approval decoding (+ unlimited flag)
     │   ├── bytecode.ts   # PUSH-aware opcode scan + EIP-1167 minimal-proxy detection
     │   ├── traits.ts     # live owner/paused/impl, token metadata, ERC-165 reads

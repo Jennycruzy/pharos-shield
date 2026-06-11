@@ -42,6 +42,21 @@ export const MAX_UINT256 = (1n << 256n) - 1n;
 /** Half the uint256 space; amounts at/above this are effectively unlimited. */
 const HALF_UINT256 = 1n << 255n;
 
+function decodeExact(
+  types: readonly string[],
+  body: string,
+): readonly unknown[] | undefined {
+  try {
+    const decoded = abi.decode(types, body);
+    if (abi.encode(types, decoded).toLowerCase() !== body.toLowerCase()) {
+      return undefined;
+    }
+    return [...decoded];
+  } catch {
+    return undefined;
+  }
+}
+
 /** Minimal log shape (decoupled from ethers' Log type). */
 export interface LogLike {
   address: string;
@@ -223,12 +238,14 @@ export function decodeTokenCalls(frames: ReadonlyArray<CallFrame>): DecodedToken
     const input = f.input ?? '0x';
     if (input.length < 10 || !f.to) continue;
     const sel = input.slice(0, 10).toLowerCase();
-    const token = getAddress(f.to);
     const body = '0x' + input.slice(10);
 
     try {
+      const token = getAddress(f.to);
       if (sel === SEL_TRANSFER) {
-        const [to, amount] = abi.decode(['address', 'uint256'], body) as unknown as [string, bigint];
+        const decoded = decodeExact(['address', 'uint256'], body);
+        if (!decoded) continue;
+        const [to, amount] = decoded as [string, bigint];
         callIntents.push({
           target: token,
           caller: getAddress(f.from),
@@ -242,10 +259,12 @@ export function decodeTokenCalls(frames: ReadonlyArray<CallFrame>): DecodedToken
           source: 'call-intent',
         });
       } else if (sel === SEL_TRANSFER_FROM) {
-        const [from, to, value] = abi.decode(
+        const decoded = decodeExact(
           ['address', 'address', 'uint256'],
           body,
-        ) as unknown as [string, string, bigint];
+        );
+        if (!decoded) continue;
+        const [from, to, value] = decoded as [string, string, bigint];
         callIntents.push({
           target: token,
           caller: getAddress(f.from),
@@ -260,10 +279,9 @@ export function decodeTokenCalls(frames: ReadonlyArray<CallFrame>): DecodedToken
           source: 'call-intent',
         });
       } else if (sel === SEL_APPROVE) {
-        const [spender, amount] = abi.decode(['address', 'uint256'], body) as unknown as [
-          string,
-          bigint,
-        ];
+        const decoded = decodeExact(['address', 'uint256'], body);
+        if (!decoded) continue;
+        const [spender, amount] = decoded as [string, bigint];
         const size = classifyApprovalSize(amount);
         callIntents.push({
           target: token,
@@ -277,10 +295,9 @@ export function decodeTokenCalls(frames: ReadonlyArray<CallFrame>): DecodedToken
           source: 'call-intent',
         });
       } else if (sel === SEL_SET_APPROVAL_FOR_ALL) {
-        const [operator, approved] = abi.decode(['address', 'bool'], body) as unknown as [
-          string,
-          boolean,
-        ];
+        const decoded = decodeExact(['address', 'bool'], body);
+        if (!decoded) continue;
+        const [operator, approved] = decoded as [string, boolean];
         callIntents.push({
           target: token,
           caller: getAddress(f.from),

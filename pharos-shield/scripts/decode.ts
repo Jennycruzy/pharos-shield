@@ -14,6 +14,18 @@ const abi = AbiCoder.defaultAbiCoder();
 const ERROR_STRING_SELECTOR = '0x08c379a0'; // Error(string)
 const PANIC_SELECTOR = '0x4e487b71'; // Panic(uint256)
 
+function decodeExact(types: readonly string[], body: string): readonly unknown[] | undefined {
+  try {
+    const decoded = abi.decode(types, body);
+    if (abi.encode(types, decoded).toLowerCase() !== body.toLowerCase()) {
+      return undefined;
+    }
+    return [...decoded];
+  } catch {
+    return undefined;
+  }
+}
+
 /** Solidity Panic(uint256) code meanings (subset defined by the compiler). */
 const PANIC_CODES: Record<number, string> = {
   0x00: 'generic compiler panic',
@@ -79,38 +91,42 @@ export function decodeRevert(data: string | undefined): DecodedRevert {
   const selector = data.slice(0, 10).toLowerCase();
 
   if (selector === ERROR_STRING_SELECTOR) {
-    try {
-      const [msg] = abi.decode(['string'], '0x' + data.slice(10));
+    const decoded = decodeExact(['string'], '0x' + data.slice(10));
+    if (decoded) {
+      const [msg] = decoded;
       return { kind: 'Error', reason: String(msg), selector, raw: data };
-    } catch {
-      return {
-        kind: 'Error',
-        reason: 'Error(string) payload present but undecodable',
-        selector,
-        raw: data,
-      };
     }
+    return {
+      kind: 'Error',
+      reason: 'Error(string) payload present but undecodable',
+      selector,
+      raw: data,
+    };
   }
 
   if (selector === PANIC_SELECTOR) {
-    try {
-      const [code] = abi.decode(['uint256'], '0x' + data.slice(10));
-      const codeNum = Number(code);
-      const meaning = PANIC_CODES[codeNum] ?? 'unknown panic code';
+    const decoded = decodeExact(['uint256'], '0x' + data.slice(10));
+    if (decoded) {
+      const [code] = decoded as [bigint];
+      const codeNumber =
+        code <= BigInt(Number.MAX_SAFE_INTEGER) ? Number(code) : undefined;
+      const meaning =
+        codeNumber === undefined
+          ? 'unknown panic code'
+          : PANIC_CODES[codeNumber] ?? 'unknown panic code';
       return {
         kind: 'Panic',
-        reason: `Panic(0x${codeNum.toString(16).padStart(2, '0')}): ${meaning}`,
-        selector,
-        raw: data,
-      };
-    } catch {
-      return {
-        kind: 'Panic',
-        reason: 'Panic(uint256) payload present but undecodable',
+        reason: `Panic(0x${code.toString(16).padStart(2, '0')}): ${meaning}`,
         selector,
         raw: data,
       };
     }
+    return {
+      kind: 'Panic',
+      reason: 'Panic(uint256) payload present but undecodable',
+      selector,
+      raw: data,
+    };
   }
 
   // Unknown custom error — report selector faithfully, do NOT invent a name.

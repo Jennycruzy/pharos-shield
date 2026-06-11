@@ -40,6 +40,7 @@ npm run cli -- inspect  0x<address>
 npm run cli -- autopsy  0x<txhash>
 npm run cli -- simulate --from 0x<addr> --to 0x<addr> --data 0x<calldata>
 npm run cli -- probe
+npm run cli -- verify-evidence evidence.json
 # flags: --json (machine output), --network testnet (secondary; mainnet default)
 ```
 
@@ -62,8 +63,12 @@ npm run mcp:http      # Streamable HTTP on http://127.0.0.1:8731/mcp
 3. **Report verified facts, not verdicts.** "admin slot = 0x…", "would revert:
    <reason>", "cause undetermined" — never a green "SAFE" badge.
 4. Every command validates chain ID, verifies mainnet genesis, checks freshness,
-   and pins state reads to one block hash. Default mainnet RPC
+   pins state reads to a confirmation-depth block hash, and rechecks it after
+   analysis. Configured independent RPC peers must meet quorum; one endpoint is
+   labeled `single-endpoint`, never quorum. Default mainnet RPC
    `https://rpc.pharos.xyz` is confirmed to expose
    `debug_traceCall` / `debug_traceTransaction` with `callTracer`. Pharos returns
    top-level reverts in `debug_traceCall` as JSON-RPC error code 3 with revert
    data in `error.data` (handled in `scripts/simulate.ts`).
+5. Evidence signing is opt-in and uses only `PHAROS_EVIDENCE_SIGNING_KEY`.
+   Never request or reuse a wallet transaction key for evidence.

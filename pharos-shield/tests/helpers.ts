@@ -16,9 +16,13 @@ export function testConfig(
 ): ResolvedConfig {
   return {
     network: TEST_NETWORK,
+    rpcUrls: [TEST_NETWORK.rpcUrl],
     rpcUrl: TEST_NETWORK.rpcUrl,
     timeoutMs: 1000,
     maxBlockAgeSeconds: 300,
+    quorumMinimum: 1,
+    finalityConfirmations: 0,
+    maxTipSkew: 5,
     ...overrides,
   };
 }

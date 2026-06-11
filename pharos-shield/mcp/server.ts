@@ -28,10 +28,14 @@ import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/
 import type { Transport } from '@modelcontextprotocol/sdk/shared/transport.js';
 
 import { loadConfig } from '../scripts/config.js';
-import { createClient, probeTraceSupport } from '../scripts/rpc.js';
+import { blockAnchor, createClient, probeTraceSupport } from '../scripts/rpc.js';
 import { inspect } from '../scripts/inspect.js';
 import { autopsy } from '../scripts/autopsy.js';
 import { simulate } from '../scripts/simulate.js';
+import {
+  createEvidenceBundle,
+  type EvidencePayload,
+} from '../scripts/evidence.js';
 
 /** Build a fresh client per call so PHAROS_NETWORK changes are honored. */
 function client() {
@@ -41,6 +45,19 @@ function client() {
 function jsonContent(obj: unknown) {
   const text = JSON.stringify(obj, (_k, v) => (typeof v === 'bigint' ? v.toString() : v), 2);
   return { content: [{ type: 'text' as const, text }] };
+}
+
+async function resultContent(
+  command: EvidencePayload['command'],
+  c: ReturnType<typeof client>,
+  result: unknown,
+  includeEvidence: boolean | undefined,
+) {
+  return jsonContent(
+    includeEvidence
+      ? await createEvidenceBundle(c, command, result)
+      : result,
+  );
 }
 
 function errorContent(err: unknown) {
@@ -75,11 +92,17 @@ function buildServer(): McpServer {
         'verified-source claim.',
       inputSchema: {
         address: z.string().describe('0x-prefixed 20-byte address to inspect'),
+        includeEvidence: z
+          .boolean()
+          .optional()
+          .describe('Return a signed evidence bundle; requires PHAROS_EVIDENCE_SIGNING_KEY'),
       },
     },
-    async ({ address }) => {
+    async ({ address, includeEvidence }) => {
       try {
-        return jsonContent(await inspect(client(), address));
+        const c = client();
+        const result = await inspect(c, address);
+        return await resultContent('inspect', c, result, includeEvidence);
       } catch (err) {
         return errorContent(err);
       }
@@ -101,11 +124,17 @@ function buildServer(): McpServer {
         'call reverted", "what tokens did this move".',
       inputSchema: {
         txhash: z.string().describe('0x-prefixed 32-byte transaction hash'),
+        includeEvidence: z
+          .boolean()
+          .optional()
+          .describe('Return a signed evidence bundle; requires PHAROS_EVIDENCE_SIGNING_KEY'),
       },
     },
-    async ({ txhash }) => {
+    async ({ txhash, includeEvidence }) => {
       try {
-        return jsonContent(await autopsy(client(), txhash));
+        const c = client();
+        const result = await autopsy(c, txhash);
+        return await resultContent('autopsy', c, result, includeEvidence);
       } catch (err) {
         return errorContent(err);
       }
@@ -117,7 +146,7 @@ function buildServer(): McpServer {
     {
       title: 'Simulate (dry-run) a Pharos transaction',
       description:
-        'Pre-flight / dry-run a Pharos call via debug_traceCall at one pinned latest-block hash, before signing. ' +
+        'Pre-flight / dry-run a Pharos call via debug_traceCall at one quorum-checked confirmation-depth block hash, before signing. ' +
         'Reports whether it would revert (with decoded reason), the would-be call tree, native PROS ' +
         'value intents, and selector-derived ERC-compatible transfer/approval call intents — flagging UNLIMITED ' +
         'approvals (max uint256 / setApprovalForAll), the most common way wallets get drained. Use for: ' +
@@ -131,6 +160,10 @@ function buildServer(): McpServer {
         data: z.string().optional().describe('0x calldata (default 0x)'),
         value: z.string().optional().describe('PROS amount (decimal e.g. "1.5") or hex wei'),
         gas: z.string().optional().describe('gas limit (decimal or hex)'),
+        includeEvidence: z
+          .boolean()
+          .optional()
+          .describe('Return a signed evidence bundle; requires PHAROS_EVIDENCE_SIGNING_KEY'),
       },
     },
     async (params) => {
@@ -142,7 +175,14 @@ function buildServer(): McpServer {
           ...(params.value !== undefined ? { value: params.value } : {}),
           ...(params.gas !== undefined ? { gas: params.gas } : {}),
         };
-        return jsonContent(await simulate(client(), args));
+        const c = client();
+        const result = await simulate(c, args);
+        return await resultContent(
+          'simulate',
+          c,
+          result,
+          params.includeEvidence,
+        );
       } catch (err) {
         return errorContent(err);
       }
@@ -156,19 +196,26 @@ function buildServer(): McpServer {
       description:
         'Report the active network (mainnet 1672 by default), RPC URL, and a LIVE check of ' +
         'whether the debug_* trace namespace is enabled on it.',
-      inputSchema: {},
+      inputSchema: {
+        includeEvidence: z
+          .boolean()
+          .optional()
+          .describe('Return a signed evidence bundle; requires PHAROS_EVIDENCE_SIGNING_KEY'),
+      },
     },
-    async () => {
+    async ({ includeEvidence }) => {
       try {
         const c = client();
         const cap = await probeTraceSupport(c);
-        return jsonContent({
+        const result = {
           network: c.config.network.name,
           chainId: c.config.network.chainId,
           rpcUrl: c.config.rpcUrl,
           defaultRpcVerified: c.config.network.defaultRpcVerified,
+          block: blockAnchor(cap.block),
           trace: cap,
-        });
+        };
+        return await resultContent('probe', c, result, includeEvidence);
       } catch (err) {
         return errorContent(err);
       }

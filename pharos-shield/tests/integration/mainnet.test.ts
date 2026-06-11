@@ -1,12 +1,17 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import test from 'node:test';
+import { Wallet } from 'ethers';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import type { Transport } from '@modelcontextprotocol/sdk/shared/transport.js';
 import { autopsy } from '../../scripts/autopsy.js';
 import { loadConfig } from '../../scripts/config.js';
+import {
+  createEvidenceBundle,
+  verifyEvidenceBundle,
+} from '../../scripts/evidence.js';
 import { inspect } from '../../scripts/inspect.js';
 import {
   createClient,
@@ -23,6 +28,9 @@ mainnetTest('Pharos mainnet commands use real chain 1672 artifacts', async () =>
   const client = createClient(config);
   const snapshot = await prepareCommand(client);
   assert.equal(snapshot.chainId, 1672);
+  assert.equal(snapshot.consensus.mode, 'single-endpoint');
+  assert.equal(snapshot.confirmations >= 2, true);
+  assert.equal(snapshot.meetsFinalityPolicy, true);
 
   const capability = await probeTraceSupport(client);
   assert.equal(capability.traceCall, true);
@@ -36,6 +44,16 @@ mainnetTest('Pharos mainnet commands use real chain 1672 artifacts', async () =>
   assert.equal(
     proxy.proxy.implementation,
     '0x4EE2F9B7cf3A68966c370F3eb2C16613d3235245',
+  );
+  const evidence = await createEvidenceBundle(client, 'inspect', proxy, {
+    PHAROS_EVIDENCE_SIGNING_KEY: Wallet.createRandom().privateKey,
+  });
+  assert.equal(verifyEvidenceBundle(evidence).valid, true);
+  assert.equal(evidence.payload.block.blockHash, proxy.block.blockHash);
+  assert.ok(
+    evidence.payload.codeHashes.some(
+      ({ address }) => address.toLowerCase() === proxy.address.toLowerCase(),
+    ),
   );
 
   const failed = await autopsy(
@@ -75,6 +93,28 @@ function assertProbeContent(result: unknown): void {
   assert.match(text, /"traceTransaction": true/);
 }
 
+function assertSignedEvidenceContent(result: unknown): void {
+  assert.ok(result && typeof result === 'object' && 'content' in result);
+  const content = (result as { content: unknown }).content;
+  assert.ok(Array.isArray(content));
+  const text = content
+    .filter(
+      (item: unknown): item is { type: 'text'; text: string } =>
+        typeof item === 'object' &&
+        item !== null &&
+        'type' in item &&
+        item.type === 'text' &&
+        'text' in item &&
+        typeof item.text === 'string',
+    )
+    .map((item: { text: string }) => item.text)
+    .join('\n');
+  const bundle = JSON.parse(text) as unknown;
+  assert.equal(verifyEvidenceBundle(bundle).valid, true);
+  assert.match(text, /pharos-shield-evidence\/v1/);
+  assert.match(text, /"chainId": 1672/);
+}
+
 async function waitForHttpServer(
   child: ReturnType<typeof spawn>,
   timeoutMs = 10_000,
@@ -100,13 +140,20 @@ mainnetTest('both MCP transports call the live mainnet probe', async () => {
     command: process.execPath,
     args: ['--import', 'tsx', 'mcp/server.ts'],
     cwd: process.cwd(),
-    env: { ...process.env, PHAROS_NETWORK: 'mainnet' },
+    env: {
+      ...process.env,
+      PHAROS_NETWORK: 'mainnet',
+      PHAROS_EVIDENCE_SIGNING_KEY: Wallet.createRandom().privateKey,
+    },
     stderr: 'pipe',
   });
   await stdioClient.connect(stdio);
   try {
-    assertProbeContent(
-      await stdioClient.callTool({ name: 'shield_probe', arguments: {} }),
+    assertSignedEvidenceContent(
+      await stdioClient.callTool({
+        name: 'shield_probe',
+        arguments: { includeEvidence: true },
+      }),
     );
   } finally {
     await stdioClient.close();

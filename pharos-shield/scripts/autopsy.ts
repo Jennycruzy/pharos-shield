@@ -11,8 +11,14 @@
  */
 
 import { ethers } from 'ethers';
-import type { ChainSnapshot, ShieldClient } from './rpc.js';
-import { callAt, prepareCommand, RpcError } from './rpc.js';
+import type { BlockAnchor, ChainSnapshot, ShieldClient } from './rpc.js';
+import {
+  blockAnchor,
+  callAt,
+  finalizeCommandResult,
+  prepareCommand,
+  RpcError,
+} from './rpc.js';
 import {
   traceTransaction,
   propagatedFailure,
@@ -58,7 +64,7 @@ export interface AutopsyResult {
   to?: string;
   blockNumber?: number;
   gasUsed?: string;
-  block?: Pick<ChainSnapshot, 'blockNumber' | 'blockHash' | 'timestamp'>;
+  block: BlockAnchor;
   callCount?: number;
   failingCall?: FailingCall;
   /** Errored frames that did not propagate the transaction's root revert. */
@@ -181,19 +187,20 @@ export async function autopsy(
   const receipt = await client.provider.getTransactionReceipt(txHash);
 
   if (!tx || !receipt) {
-    return {
+    return finalizeCommandResult(client, initialSnapshot, {
       network: client.config.network.name,
       txHash,
       found: false,
       status: 'unknown',
       traced: false,
+      block: blockAnchor(initialSnapshot),
       probableCause:
         'transaction not found on this network — check the hash and PHAROS_NETWORK',
       notes: [
         `No transaction/receipt for ${txHash} on ${client.config.rpcUrl}.`,
         `Chain validated at block ${initialSnapshot.blockNumber} (${initialSnapshot.blockHash}).`,
       ],
-    };
+    });
   }
 
   const snapshot = await prepareCommand(client, receipt.blockHash);
@@ -212,11 +219,7 @@ export async function autopsy(
     ...(tx.to ? { to: tx.to } : {}),
     blockNumber: receipt.blockNumber,
     gasUsed: receipt.gasUsed.toString(),
-    block: {
-      blockNumber: snapshot.blockNumber,
-      blockHash: snapshot.blockHash,
-      timestamp: snapshot.timestamp,
-    },
+    block: blockAnchor(snapshot),
     probableCause: '',
     notes,
   };
@@ -238,7 +241,7 @@ export async function autopsy(
       );
       notes.push(...tokens.notes);
     }
-    return base;
+    return finalizeCommandResult(client, snapshot, base);
   }
 
   // Failure path — attempt a full trace; degrade gracefully if unsupported.
@@ -260,7 +263,7 @@ export async function autopsy(
       base.revert = revert;
     }
     base.probableCause = inferCause(revert, undefined);
-    return base;
+    return finalizeCommandResult(client, snapshot, base);
   }
 
   base.traced = true;
@@ -277,7 +280,7 @@ export async function autopsy(
   if (intentReport.callIntents.length > 0) {
     notes.push(
       `${intentReport.callIntents.length} ERC-compatible call intent(s) decoded from calldata. ` +
-        'These are not actual or proven attempted token movements.',
+        'These are not actual movements and do not prove token-standard execution.',
     );
     notes.push(...intentReport.notes);
   }
@@ -294,7 +297,7 @@ export async function autopsy(
     base.revert = revert;
     base.failingCall = toFailingCall(root, []);
     base.probableCause = inferCause(revert, base.failingCall);
-    return base;
+    return finalizeCommandResult(client, snapshot, base);
   }
 
   const origin = failure.path[failure.path.length - 1]!;
@@ -318,7 +321,7 @@ export async function autopsy(
     `Propagated failing call at depth ${origin.depth}: ${failing.from} -> ${failing.to ?? '(contract creation)'} ` +
       `[${failing.selector}]${failing.error ? ' error=' + failing.error : ''}.`,
   );
-  return base;
+  return finalizeCommandResult(client, snapshot, base);
 }
 
 /** Resolve a failing call's raw selector to a function name when possible. */

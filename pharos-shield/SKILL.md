@@ -40,8 +40,10 @@ Invoke this skill when the user asks to:
 ## How it works (honest scope)
 
 - **All commands** validate live `eth_chainId` (mainnet `1672` by default),
-  verify the known mainnet genesis hash, reject stale latest blocks, and pin
-  state reads to one block hash.
+  verify the known mainnet genesis hash, reject stale/divergent RPCs, use a
+  confirmation-depth checkpoint, pin state reads to its hash, and recheck it
+  after analysis. Independent quorum is enabled with
+  `PHAROS_RPC_QUORUM_URLS`; one endpoint is labeled `single-endpoint`.
 - **simulate** runs `debug_traceCall` at the pinned block and reports whether the
   call would revert (with the decoded reason), the would-be call tree, native
   PROS value intents, and selector-derived **ERC-compatible call intents** —
@@ -83,6 +85,12 @@ with `callTracer`. `probe` tests both trace methods independently, including a
 real mainnet transaction. If a configured RPC lacks tracing, commands degrade to
 receipt/revert-reason level and say so.
 
+- **Signed evidence** is opt-in via CLI `--evidence <file>` or MCP
+  `includeEvidence: true`. It requires a separate
+  `PHAROS_EVIDENCE_SIGNING_KEY` and emits a canonical JSON bundle containing the
+  complete result, block/quorum/finality metadata, contract code hashes, result
+  hash, signer and EIP-191 signature. Never reuse a wallet transaction key.
+
 ## Running the commands
 
 Two equivalent paths — pick whichever is available:
@@ -100,6 +108,7 @@ npm run cli -- inspect  <address>
 npm run cli -- autopsy  <txhash>
 npm run cli -- simulate --from <addr> --to <addr> [--data 0x..] [--value 1.0]
 npm run cli -- probe          # show network + live trace capability
+npm run cli -- verify-evidence evidence.json
 # add --json for machine-readable output; --network testnet to switch (secondary)
 ```
 
@@ -109,7 +118,8 @@ Real verified mainnet examples and exact outputs are in the repository
 ## Scripts
 
 - `scripts/config.ts` — networks, verified RPC URLs, EIP-1967 slots
-- `scripts/rpc.ts` — provider + live trace-capability probe + typed errors
+- `scripts/rpc.ts` — provider + quorum/finality/reorg checks + trace probe
+- `scripts/evidence.ts` — canonical result/code hashes + evidence signatures
 - `scripts/trace.ts` — callTracer core (`debug_traceCall` / `debug_traceTransaction`)
 - `scripts/decode.ts` — revert + calldata decoding (Error/Panic/custom)
 - `scripts/signatures.ts` — openchain signature-DB lookup + decode-confirmed naming

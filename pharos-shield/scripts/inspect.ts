@@ -15,8 +15,10 @@ import { ethers, getAddress } from 'ethers';
 import {
   getCodeAt,
   getStorageAt,
+  blockAnchor,
+  finalizeCommandResult,
   prepareCommand,
-  type ChainSnapshot,
+  type BlockAnchor,
   type ShieldClient,
 } from './rpc.js';
 import { EIP1967_SLOTS, LEGACY_IMPL_SLOT } from './config.js';
@@ -33,12 +35,13 @@ import {
 
 const ZERO_ADDRESS = '0x0000000000000000000000000000000000000000';
 
-/** Extract a 20-byte address from a 32-byte storage word (right-aligned). */
-function addressFromSlot(word: string): string {
-  // word is 0x + 64 hex; the address is the low 20 bytes (last 40 hex chars).
-  const hex = word.replace(/^0x/, '').padStart(64, '0');
-  const addr = '0x' + hex.slice(24);
-  return getAddress(addr);
+/** Decode a canonical right-aligned address storage word; reject junk high bits. */
+export function addressFromSlot(word: string): string | undefined {
+  if (!/^0x[0-9a-fA-F]{64}$/.test(word)) return undefined;
+  const hex = word.slice(2);
+  if (!/^0{24}/.test(hex)) return undefined;
+  const address = getAddress(`0x${hex.slice(24)}`);
+  return address === ZERO_ADDRESS ? undefined : address;
 }
 
 function isZeroWord(word: string): boolean {
@@ -71,7 +74,7 @@ export interface InspectResult {
   kind: AddressKind;
   /** Size of deployed bytecode in bytes (0 for EOA). */
   codeSize: number;
-  block: Pick<ChainSnapshot, 'blockNumber' | 'blockHash' | 'timestamp'>;
+  block: BlockAnchor;
   proxy: ProxyInfo;
   /** What the admin slot implies about upgrade authority (inferred, not source). */
   upgradeAuthority: string;
@@ -100,16 +103,12 @@ export async function inspect(
 
   const notes: string[] = [];
   const snapshot = await prepareCommand(client);
-  const block = {
-    blockNumber: snapshot.blockNumber,
-    blockHash: snapshot.blockHash,
-    timestamp: snapshot.timestamp,
-  };
+  const block = blockAnchor(snapshot);
   const code = await getCodeAt(client, address, snapshot);
   const codeSize = code === '0x' ? 0 : (code.length - 2) / 2;
 
   if (codeSize === 0) {
-    return {
+    return finalizeCommandResult(client, snapshot, {
       network: client.config.network.name,
       address,
       kind: 'eoa',
@@ -119,7 +118,7 @@ export async function inspect(
       upgradeAuthority:
         'not applicable — this is an externally-owned account (no code, no upgrade slots)',
       notes: ['eth_getCode returned 0x: no contract deployed at this address.'],
-    };
+    });
   }
 
   // Read all candidate slots concurrently.
@@ -130,7 +129,13 @@ export async function inspect(
     getStorageAt(client, address, LEGACY_IMPL_SLOT, snapshot),
   ]);
 
-  const proxy = classifyProxy(implWord, adminWord, beaconWord, legacyWord, notes);
+  const proxy = classifyProxySlots(
+    implWord,
+    adminWord,
+    beaconWord,
+    legacyWord,
+    notes,
+  );
 
   // EIP-1167 minimal proxy: detectable from bytecode shape, independent of the
   // EIP-1967 storage slots. If the slots showed no proxy, this can still find one.
@@ -239,33 +244,44 @@ export async function inspect(
   if (Object.keys(traits).length > 0) result.traits = traits;
   if (Object.keys(token).length > 0) result.token = token;
   if (interfaces.length > 0) result.interfaces = interfaces;
-  return result;
+  return finalizeCommandResult(client, snapshot, result);
 }
 
-function classifyProxy(
+export function classifyProxySlots(
   implWord: string,
   adminWord: string,
   beaconWord: string,
   legacyWord: string,
   notes: string[],
 ): ProxyInfo {
-  const hasImpl = !isZeroWord(implWord);
-  const hasBeacon = !isZeroWord(beaconWord);
-  const hasLegacy = !isZeroWord(legacyWord);
-  const hasAdmin = !isZeroWord(adminWord);
+  const implementation = addressFromSlot(implWord);
+  const admin = addressFromSlot(adminWord);
+  const beacon = addressFromSlot(beaconWord);
+  const legacyImplementation = addressFromSlot(legacyWord);
+  for (const [label, word, decoded] of [
+    ['implementation', implWord, implementation],
+    ['admin', adminWord, admin],
+    ['beacon', beaconWord, beacon],
+    ['legacy implementation', legacyWord, legacyImplementation],
+  ] as const) {
+    if (!isZeroWord(word) && !decoded) {
+      notes.push(
+        `${label} slot was non-zero but was not a canonical right-aligned address word; ignored.`,
+      );
+    }
+  }
 
-  if (hasImpl) {
-    const implementation = addressFromSlot(implWord);
+  if (implementation) {
     const info: ProxyInfo = {
       isProxy: true,
       standard: 'eip1967',
       implementation,
     };
-    if (hasAdmin) info.admin = addressFromSlot(adminWord);
+    if (admin) info.admin = admin;
     notes.push(
       `EIP-1967 implementation slot is non-zero -> proxy. Implementation = ${implementation}.`,
     );
-    if (hasAdmin) {
+    if (admin) {
       notes.push(`EIP-1967 admin slot = ${info.admin}.`);
       notes.push(
         'The admin slot identifies an administrative endpoint; source-level authorization and callable upgrade paths are not proven by the slot alone.',
@@ -279,23 +295,25 @@ function classifyProxy(
     return info;
   }
 
-  if (hasBeacon) {
-    const beacon = addressFromSlot(beaconWord);
+  if (beacon) {
     notes.push(
       `EIP-1967 beacon slot is non-zero -> beacon proxy. Beacon = ${beacon}. ` +
         'The implementation is resolved by the beacon contract at call time.',
     );
     const info: ProxyInfo = { isProxy: true, standard: 'eip1967-beacon', beacon };
-    if (hasAdmin) info.admin = addressFromSlot(adminWord);
+    if (admin) info.admin = admin;
     return info;
   }
 
-  if (hasLegacy) {
-    const implementation = addressFromSlot(legacyWord);
+  if (legacyImplementation) {
     notes.push(
-      `Legacy OpenZeppelin implementation slot is non-zero -> legacy proxy. Implementation = ${implementation}.`,
+      `Legacy OpenZeppelin implementation slot is non-zero -> legacy proxy. Implementation = ${legacyImplementation}.`,
     );
-    return { isProxy: true, standard: 'legacy-oz', implementation };
+    return {
+      isProxy: true,
+      standard: 'legacy-oz',
+      implementation: legacyImplementation,
+    };
   }
 
   notes.push(
@@ -323,6 +341,11 @@ export function formatInspect(r: InspectResult): string {
   const lines: string[] = [];
   lines.push(`Address:   ${r.address}  (${r.network})`);
   lines.push(`Block:     ${r.block.blockNumber} (${r.block.blockHash})`);
+  lines.push(
+    `Finality:  ${r.block.confirmations} confirmation(s); ` +
+      `${r.block.consensus.agreeing}/${r.block.consensus.total} RPC agreement ` +
+      `(${r.block.consensus.mode})`,
+  );
   lines.push(`Kind:      ${r.kind}${r.kind === 'contract' ? ` (${r.codeSize} bytes of code)` : ''}`);
   if (r.kind === 'contract') {
     lines.push(`Proxy:     ${r.proxy.isProxy ? `yes (${r.proxy.standard})` : 'no'}`);

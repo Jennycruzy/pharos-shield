@@ -7,7 +7,9 @@
  */
 
 import { loadConfig } from './config.js';
+import { readFile, writeFile } from 'node:fs/promises';
 import {
+  blockAnchor,
   createClient,
   probeTraceSupport,
   RpcError,
@@ -15,6 +17,12 @@ import {
 import { autopsy } from './autopsy.js';
 import { simulate, formatSimulate } from './simulate.js';
 import { inspect, formatInspect } from './inspect.js';
+import {
+  createEvidenceBundle,
+  formatEvidence,
+  verifyEvidenceBundle,
+  type EvidencePayload,
+} from './evidence.js';
 import { ethers } from 'ethers';
 
 interface ParsedArgs {
@@ -56,14 +64,17 @@ Usage:
   pharos-shield simulate --from <addr> --to <addr> [--data 0x..] [--value 1.0] [--gas N]
                                                         Dry-run a call (debug_traceCall). Never sends.
   pharos-shield probe                                   Report network + live trace-namespace capability
+  pharos-shield verify-evidence <file>                  Verify an evidence signature offline
 
 Flags:
   --json        Emit JSON instead of formatted text
   --network     Override PHAROS_NETWORK for this run (mainnet|testnet)
+  --evidence    Write a signed JSON evidence bundle to this file
 
 Env:
   PHAROS_NETWORK   mainnet (default) | testnet
   PHAROS_*_RPC     override RPC URLs (see .env.example)
+  PHAROS_EVIDENCE_SIGNING_KEY  separate 32-byte key used only for evidence
 `;
 
 async function main(): Promise<number> {
@@ -75,16 +86,54 @@ async function main(): Promise<number> {
     return command ? 0 : 1;
   }
 
+  if (command === 'verify-evidence') {
+    const path = positionals[0];
+    if (!path) {
+      process.stderr.write('verify-evidence requires a <file>.\n');
+      return 1;
+    }
+    const parsed = JSON.parse(await readFile(path, 'utf8')) as unknown;
+    const verification = verifyEvidenceBundle(parsed);
+    if (json) {
+      process.stdout.write(JSON.stringify(verification, null, 2) + '\n');
+    } else {
+      process.stdout.write(
+        `${verification.valid ? 'VALID' : 'INVALID'}: ${verification.reason}` +
+          `${verification.signer ? `\nSigner: ${verification.signer}` : ''}\n`,
+      );
+    }
+    return verification.valid ? 0 : 2;
+  }
+
   // Allow --network to override env for this invocation.
   const netOverride = asString(flags.get('network'));
   if (netOverride) process.env.PHAROS_NETWORK = netOverride;
 
   const config = loadConfig();
   const client = createClient(config);
+  const evidencePath = asString(flags.get('evidence'));
+  if (flags.get('evidence') === true) {
+    throw new Error('--evidence requires an output file path.');
+  }
 
-  const emit = (obj: unknown, text: string): void => {
+  const emit = async (
+    commandName: EvidencePayload['command'],
+    obj: unknown,
+    text: string,
+  ): Promise<void> => {
+    if (evidencePath) {
+      const bundle = await createEvidenceBundle(client, commandName, obj);
+      await writeFile(evidencePath, formatEvidence(bundle) + '\n', {
+        encoding: 'utf8',
+        mode: 0o600,
+      });
+    }
     if (json) process.stdout.write(JSON.stringify(obj, bigintReplacer, 2) + '\n');
-    else process.stdout.write(text + '\n');
+    else {
+      process.stdout.write(
+        text + (evidencePath ? `\nEvidence:  ${evidencePath}` : '') + '\n',
+      );
+    }
   };
 
   switch (command) {
@@ -95,14 +144,18 @@ async function main(): Promise<number> {
         chainId: config.network.chainId,
         rpcUrl: config.rpcUrl,
         defaultRpcVerified: config.network.defaultRpcVerified,
-        block: cap.block,
+        block: blockAnchor(cap.block),
         trace: cap,
       };
-      emit(
+      await emit(
+        'probe',
         obj,
         `Network:  ${config.network.name} (chain ${config.network.chainId})\n` +
           `RPC:      ${config.rpcUrl}\n` +
           `Block:    ${cap.block.blockNumber} (${cap.block.blockHash}) age=${cap.block.ageSeconds}s\n` +
+          `Finality: ${cap.block.confirmations} confirmation(s); ` +
+          `${cap.block.consensus.agreeing}/${cap.block.consensus.total} RPC agreement ` +
+          `(${cap.block.consensus.mode})\n` +
           `Trace:    traceCall=${cap.traceCall} traceTransaction=${cap.traceTransaction}\n` +
           `Note:     ${cap.note}`,
       );
@@ -116,7 +169,7 @@ async function main(): Promise<number> {
         return 1;
       }
       const result = await inspect(client, addr);
-      emit(result, formatInspect(result));
+      await emit('inspect', result, formatInspect(result));
       return 0;
     }
 
@@ -127,7 +180,7 @@ async function main(): Promise<number> {
         return 1;
       }
       const result = await autopsy(client, tx);
-      emit(result, formatAutopsy(result));
+      await emit('autopsy', result, formatAutopsy(result));
       return result.status === 'failed' || result.status === 'success' ? 0 : 2;
     }
 
@@ -145,7 +198,7 @@ async function main(): Promise<number> {
         ...(asString(flags.get('gas')) ? { gas: asString(flags.get('gas'))! } : {}),
       };
       const result = await simulate(client, params);
-      emit(result, formatSimulate(result));
+      await emit('simulate', result, formatSimulate(result));
       return 0;
     }
 
@@ -160,6 +213,12 @@ function formatAutopsy(r: ReturnType<typeof autopsy> extends Promise<infer T> ? 
   lines.push(`Autopsy (${r.network})  tx ${r.txHash}`);
   if (!r.found) {
     lines.push(`Status:    NOT FOUND`);
+    lines.push(`Block:     ${r.block.blockNumber} (${r.block.blockHash})`);
+    lines.push(
+      `Finality:  ${r.block.confirmations} confirmation(s); ` +
+        `${r.block.consensus.agreeing}/${r.block.consensus.total} RPC agreement ` +
+        `(${r.block.consensus.mode})`,
+    );
     lines.push(`Cause:     ${r.probableCause}`);
     return lines.join('\n');
   }
@@ -173,7 +232,12 @@ function formatAutopsy(r: ReturnType<typeof autopsy> extends Promise<infer T> ? 
   if (r.from) lines.push(`From:      ${r.from}`);
   if (r.to) lines.push(`To:        ${r.to}`);
   if (r.blockNumber !== undefined) lines.push(`Block:     ${r.blockNumber}`);
-  if (r.block) lines.push(`Block hash:${r.block.blockHash}`);
+  lines.push(`Block hash:${r.block.blockHash}`);
+  lines.push(
+    `Finality:  ${r.block.confirmations} confirmation(s); ` +
+      `${r.block.consensus.agreeing}/${r.block.consensus.total} RPC agreement ` +
+      `(${r.block.consensus.mode})`,
+  );
   if (r.gasUsed) lines.push(`Gas used:  ${r.gasUsed}`);
   if (r.callCount !== undefined) lines.push(`Calls:     ${r.callCount} frame(s)`);
   if (r.failingCall) {
