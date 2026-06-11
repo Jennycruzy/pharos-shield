@@ -1,22 +1,18 @@
 ---
 name: pharos-shield
 description: >-
-  Transaction & contract integrity layer for Pharos mainnet (chain 1672). Use
-  when a user wants to (a) SIMULATE / dry-run / pre-flight a Pharos transaction
-	  before signing to see if it will revert, what ERC-compatible call intents
-	  appear, and whether calldata requests an UNLIMITED approval; (b) AUTOPSY /
-	  debug / diagnose why a Pharos
-  transaction FAILED or reverted (and what token movements it made or attempted),
-  given its tx hash; or (c) INSPECT a Pharos address to tell whether it is a
-  contract or EOA, whether it is a proxy (EIP-1967), and its
-  implementation/admin/upgrade authority. Triggers include "will this tx work",
-  "why did my tx fail/revert", "simulate this call", "what tokens does this move",
-  "is this an unlimited approval", "is this address a proxy", "who owns/can
-  upgrade this contract", "can this contract self-destruct", "what token is this",
-  "what does this transaction do". Reports only on-chain-verified
-	  facts (decoded reverts, receipt-log transfers/approvals, call intents, proxy
-	  slots); never a
-  SAFE/UNSAFE verdict or token risk score. NOT a token rug/honeypot scanner.
+  Transaction and contract integrity for Pharos mainnet (chain 1672). Use to:
+  SIMULATE, dry-run, or pre-flight a transaction before signing; AUTOPSY or
+  diagnose a failed/reverted transaction hash; or INSPECT an address as an EOA,
+  contract, proxy, and observable control graph. Trigger for "will this tx
+  work", "why did my tx fail", "simulate this call", "what does this transaction
+  do", "is this an unlimited approval", "is this address a proxy", "who owns or
+  can upgrade this contract", and similar Pharos execution/control questions.
+  Reports actual activity only from receipt logs or state facts; selector matches
+  are ERC-compatible call intents, not movements. Validates chain identity,
+  genesis and freshness, pins reads to one block hash, distinguishes propagated
+  from caught reverts, and inspects EIP-1967/UUPS/admin/beacon/owner/multisig/
+  timelock signals. Never sends a transaction or emits SAFE/UNSAFE or rug scores.
 ---
 
 # Pharos Shield
@@ -48,32 +44,32 @@ Invoke this skill when the user asks to:
   state reads to one block hash.
 - **simulate** runs `debug_traceCall` at the pinned block and reports whether the
   call would revert (with the decoded reason), the would-be call tree, native
-	  PROS value intents, and selector-derived **ERC-compatible call intents** —
-	  flagging
+  PROS value intents, and selector-derived **ERC-compatible call intents** —
+  flagging
   **UNLIMITED** approvals (`max uint256` / `setApprovalForAll`) before you sign.
   It **never sends a transaction**.
 - **autopsy** pulls the tx + receipt; if it succeeded it says so (and decodes the
   real `Transfer`/`Approval` events that occurred). For a failure it traces with
   `callTracer`, follows the root-propagated revert path, separates caught
-  errors, and decodes the revert
-  (`Error(string)` / `Panic(uint256)` / custom selector), reports the *attempted*
-  token movements, and gives a trace-supported probable cause — or "cause
-  undetermined" when the data does not support a confident answer.
+  errors, decodes the revert (`Error(string)` / `Panic(uint256)` / custom
+  selector), reports ERC-compatible call intents without claiming movements,
+  and gives a trace-supported probable cause — or "cause undetermined" when the
+  data does not support a confident answer.
 - **Signature resolution** — `simulate` and `autopsy` resolve raw 4-byte
   function and custom-error selectors against the **openchain.xyz** signature
   database (selectors are chain-agnostic, so this works on Pharos). A named
   custom error is applied **only when its arguments actually decode** against
-	  the revert payload with no trailing bytes, so a coincidental selector collision
-  `0x00000000`) never mislabels a revert. Sourcify is intentionally not used —
+  the revert payload with no trailing bytes, so a coincidental selector collision
+  (`0x00000000`) never mislabels a revert. Sourcify is intentionally not used —
   it does not index chain 1672 (verified at build time), so no verified ABI is
   ever claimed.
 - Successful transaction receipt logs are reported as actual activity. Trace
   selectors are reported only as **ERC-compatible call intents**, never as
   completed or proven token movements. Metadata reads are block-pinned.
 - **inspect** uses `eth_getCode` to classify contract vs EOA, reads the three
-	  EIP-1967 storage slots (+ legacy OZ slot), and builds a control graph with
-	  implementation code hashes, admin/beacon kinds, reported owners, Safe-style
-	  thresholds, timelock delays, and UUPS UUID compatibility. It also adds
+  EIP-1967 storage slots (+ legacy OZ slot), and builds a control graph with
+  implementation code hashes, admin/beacon kinds, reported owners, Safe-style
+  thresholds, timelock delays, and UUPS UUID compatibility. It also adds
   signals: EIP-1167 minimal-proxy detection, beacon `implementation()`
   resolution, PUSH-aware bytecode scan (`DELEGATECALL`/`SELFDESTRUCT`/`CREATE2`),
   and live `eth_call` reads of `owner()`/`paused()`, token name/symbol/decimals,
@@ -83,8 +79,8 @@ Invoke this skill when the user asks to:
 
 All three share one trace/RPC core. The default mainnet RPC
 (`https://rpc.pharos.xyz`) was verified to expose the `debug_*` trace namespace
-	with `callTracer`. `probe` tests both trace methods independently, including a
-	real mainnet transaction. If a configured RPC lacks tracing, commands degrade to
+with `callTracer`. `probe` tests both trace methods independently, including a
+real mainnet transaction. If a configured RPC lacks tracing, commands degrade to
 receipt/revert-reason level and say so.
 
 ## Running the commands
