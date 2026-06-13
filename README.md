@@ -1,7 +1,7 @@
 # Pharos Shield
 
-**A transaction-and-contract integrity layer for Pharos.** Three composable
-commands — `simulate`, `autopsy`, `inspect` — that answer:
+**A transaction-and-contract integrity layer for Pharos.** Four composable
+commands — `guard`, `simulate`, `autopsy`, `inspect` — that answer:
 
 > *Will this transaction do what I expect, or why did it fail?*
 > *What is this contract, and who controls it?*
@@ -51,7 +51,7 @@ bash install.sh
 `install.sh` is idempotent and does three things:
 1. `npm install` in `pharos-shield/` (this also compiles `dist/`).
 2. Registers the MCP server with Claude Code (user scope) — your
-   natural-language interface (`shield_inspect/autopsy/simulate/probe`).
+   natural-language interface (`shield_guard/inspect/autopsy/simulate/probe`).
 3. Installs the agent skill into `~/.claude/skills/pharos-shield`.
 
 Open a **new** session (MCP tools load at startup), then just ask:
@@ -102,7 +102,7 @@ Shield closes those three gaps with on-chain primitives that Pharos exposes
 
 | Moment | Question | Command |
 | --- | --- | --- |
-| Before signing | "Will this revert? What will it move?" | `simulate` |
+| Before signing | "Will this revert, what will it move, and what is the target?" | `guard` |
 | After a failure | "Why did this fail, and where?" | `autopsy` |
 | Before trusting a contract | "Is this a proxy? Who can upgrade it?" | `inspect` |
 
@@ -116,6 +116,7 @@ Map your phrasing to a command (this is also how an AI agent should route):
 
 | If you're asking… | Use | Input you need |
 | --- | --- | --- |
+| "Check this transaction before I sign it" | `guard` | `from`, `to`, `data`, optional `value` |
 | "Will this transaction work / revert?" | `simulate` | `from`, `to`, `data` |
 | "What would this call actually do before I sign?" | `simulate` | `from`, `to`, `data`, `value` |
 | "Why did my transaction fail?" | `autopsy` | a tx hash |
@@ -137,9 +138,10 @@ cp .env.example .env          # optional; defaults already target mainnet
 npm run cli -- probe          # confirm network + live trace capability
 ```
 
-Three commands, one line each:
+Four commands, one line each:
 
 ```bash
+npm run cli -- guard --from 0xYou --to 0xContract --data 0x70a08231...
 npm run cli -- inspect  0x3c2269811836af69497e5f486a85d7316753cf62
 npm run cli -- autopsy  0xdeeb262fad28864a8e031db91e99de0bb4bd42aff936876d577adcddcf0de3ff
 npm run cli -- simulate --from 0xYou --to 0xContract --data 0x70a08231...
@@ -178,7 +180,7 @@ skills and it will pull and register Shield:
 
 > "Install the `pharos-shield` skill from
 > `github.com/Jennycruzy/pharos-shield` (path `pharos-shield/`). It adds
-> three commands — `simulate`, `autopsy`, `inspect` — for verifying Pharos
+> four commands — `guard`, `simulate`, `autopsy`, `inspect` — for verifying Pharos
 > mainnet transactions and contracts."
 
 **Sparse, blobless checkout** (pulls only the skill directory, not history):
@@ -406,6 +408,26 @@ undetermined*. It never asserts a cause the trace doesn't support.
 
 ---
 
+## `guard` — single pre-sign gate
+
+`guard` composes the same `inspect` and `simulate` cores in one read-only run.
+It returns both complete reports plus stable fact keys in `flags`, including
+`unlimited_approval`, `very_large_approval`, `set_approval_for_all`,
+`native_value_intent`, `upgradeable_proxy_admin_set`, `target_is_eoa`, and
+`would_revert`.
+
+```bash
+npm run cli -- guard --from <addr> --to <addr> [--data 0x..] [--value 1.0] [--json]
+```
+
+Plain-text output groups results under **Verified facts** and **Flags (facts
+that warrant attention)**. Exit code `0` means the simulation completed with no
+flags, `2` means it completed and returned one or more fact flags, and `1` means
+Shield itself could not complete the check. These are programmatic gates, not
+SAFE/UNSAFE verdicts.
+
+---
+
 ## `simulate` — pre-flight dry-run
 
 **What it does.** Pins the latest canonical block hash, then runs
@@ -594,7 +616,7 @@ signer address and EIP-191 signature. MCP callers request the same bundle with
 
 ## Composable workflows
 
-The three commands share one core and chain naturally:
+The four commands share one core and chain naturally:
 
 **1. Failure → control structure.** A tx failed at a contract you don't
 recognize. Autopsy it, then inspect the failing `to` address to see if it's a
@@ -665,6 +687,7 @@ no logic is reimplemented.
 
 | MCP tool | Arguments | Returns |
 | --- | --- | --- |
+| `shield_guard` | `{ from, to, data?, value?, gas?, includeEvidence? }` | combined inspect/simulate report with fact flags |
 | `shield_inspect` | `{ address, includeEvidence? }` | inspect result or signed bundle |
 | `shield_autopsy` | `{ txhash, includeEvidence? }` | autopsy result or signed bundle |
 | `shield_simulate` | `{ from, to?, data?, value?, gas?, includeEvidence? }` | simulate result or signed bundle |
@@ -677,6 +700,7 @@ language and it routes to the right tool:
 
 | You say… | Agent calls |
 | --- | --- |
+| "check this transaction before I sign it" | `shield_guard` |
 | "is `0x3c22…cf62` a proxy, and who can upgrade it?" | `shield_inspect` |
 | "why did tx `0xdeeb…e3ff` fail?" | `shield_autopsy` |
 | "dry-run this call before I sign it" | `shield_simulate` |
@@ -877,8 +901,8 @@ post-command reorg detection, signed-evidence tampering, selector intent
 semantics, signature collisions, rollback accounting, propagated vs caught
 reverts, and proxy control graphs. `fast-check` property suites run randomized
 calldata, revert and proxy-slot decoder invariants. MCP transports are exercised end-to-end: `initialize` →
-`tools/list` (returns `shield_inspect`, `shield_autopsy`, `shield_simulate`,
-`shield_probe`) → `tools/call` returning real on-chain data, over **both** stdio
+`tools/list` (returns `shield_guard`, `shield_inspect`, `shield_autopsy`,
+`shield_simulate`, `shield_probe`) → `tools/call` returning real on-chain data, over **both** stdio
 and Streamable HTTP. A scheduled GitHub Actions job runs the real mainnet suite.
 
 ---
@@ -1034,10 +1058,11 @@ pharos-shield/
     │   ├── tokens.ts     # ERC-20/721 movement & approval decoding (+ unlimited flag)
     │   ├── bytecode.ts   # PUSH-aware opcode scan + EIP-1167 minimal-proxy detection
     │   ├── traits.ts     # live owner/paused/impl, token metadata, ERC-165 reads
+    │   ├── guard.ts      # INSPECT + SIMULATE FACT GATE
     │   ├── simulate.ts   # PRE-FLIGHT
     │   ├── autopsy.ts    # POST-FAILURE
     │   ├── inspect.ts    # CONTROL STRUCTURE
-    │   └── cli.ts        # simulate | autopsy | inspect | probe
+    │   └── cli.ts        # guard | simulate | autopsy | inspect | probe
     └── mcp/
         └── server.ts     # same core as MCP tools (stdio + HTTP)
 ```

@@ -16,7 +16,13 @@ test('stdio MCP initializes and lists the shared tools', async () => {
     const tools = await client.listTools();
     assert.deepEqual(
       tools.tools.map(({ name }) => name).sort(),
-      ['shield_autopsy', 'shield_inspect', 'shield_probe', 'shield_simulate'],
+      [
+        'shield_autopsy',
+        'shield_guard',
+        'shield_inspect',
+        'shield_probe',
+        'shield_simulate',
+      ],
     );
   } finally {
     await client.close();

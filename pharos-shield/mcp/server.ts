@@ -2,9 +2,9 @@
 /**
  * Pharos Shield MCP server.
  *
- * Exposes the SAME three core commands as MCP tools so any MCP-compatible agent
+ * Exposes the same shared core commands as MCP tools so any MCP-compatible agent
  * can call Shield natively. This is a THIN adapter — it reuses scripts/ core
- * (simulate, autopsy, inspect) verbatim; no logic is reimplemented here.
+ * (guard, simulate, autopsy, inspect) verbatim; no logic is reimplemented here.
  *
  * Transports:
  *   - stdio (default): `node --import tsx mcp/server.ts`
@@ -14,6 +14,7 @@
  *   shield_inspect   { address }
  *   shield_autopsy   { txhash }
  *   shield_simulate  { from, to?, data?, value?, gas? }
+ *   shield_guard     { from, to, data?, value?, gas? }
  *   shield_probe     {}                      (network + live trace capability)
  *
  * Honors PHAROS_NETWORK (default mainnet/1672) exactly like the CLI.
@@ -32,6 +33,7 @@ import { blockAnchor, createClient, probeTraceSupport } from '../scripts/rpc.js'
 import { inspect } from '../scripts/inspect.js';
 import { autopsy } from '../scripts/autopsy.js';
 import { simulate } from '../scripts/simulate.js';
+import { guard } from '../scripts/guard.js';
 import {
   createEvidenceBundle,
   type EvidencePayload,
@@ -73,6 +75,49 @@ function buildServer(): McpServer {
     name: 'pharos-shield',
     version: '0.1.0',
   });
+
+  server.registerTool(
+    'shield_guard',
+    {
+      title: 'Guard a Pharos transaction before signing',
+      description:
+        'Run one pre-sign integrity check that composes the existing address inspection and exact ' +
+        'transaction simulation cores. Reports target kind, proxy implementation/admin facts, notable ' +
+        'opcodes, revert outcome and decoded reason, call tree, ERC-compatible approval intents, and ' +
+        'native PROS value intents. Returns stable fact flags such as unlimited_approval, ' +
+        'very_large_approval, set_approval_for_all, native_value_intent, ' +
+        'upgradeable_proxy_admin_set, target_is_eoa, and would_revert. Use for: "check this ' +
+        'transaction before I sign it", "guard this approve call", or "pre-flight this contract ' +
+        'interaction". Read-only; never sends a transaction and never emits a SAFE/UNSAFE verdict.',
+      inputSchema: {
+        from: z.string().describe('0x sender address'),
+        to: z.string().describe('0x target address'),
+        data: z.string().optional().describe('0x calldata (default 0x)'),
+        value: z.string().optional().describe('PROS amount (decimal or hex wei)'),
+        gas: z.string().optional().describe('gas limit (decimal or hex)'),
+        includeEvidence: z
+          .boolean()
+          .optional()
+          .describe('Return a signed evidence bundle; requires PHAROS_EVIDENCE_SIGNING_KEY'),
+      },
+    },
+    async (params) => {
+      try {
+        const args = {
+          from: params.from,
+          to: params.to,
+          ...(params.data !== undefined ? { data: params.data } : {}),
+          ...(params.value !== undefined ? { value: params.value } : {}),
+          ...(params.gas !== undefined ? { gas: params.gas } : {}),
+        };
+        const c = client();
+        const result = await guard(c, args);
+        return await resultContent('guard', c, result, params.includeEvidence);
+      } catch (err) {
+        return errorContent(err);
+      }
+    },
+  );
 
   server.registerTool(
     'shield_inspect',

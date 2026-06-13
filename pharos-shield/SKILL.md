@@ -2,7 +2,7 @@
 name: pharos-shield
 description: >-
   Transaction and contract integrity for Pharos mainnet (chain 1672). Use to:
-  SIMULATE, dry-run, or pre-flight a transaction before signing; AUTOPSY or
+  GUARD or pre-flight a transaction before signing; SIMULATE or dry-run a call; AUTOPSY or
   diagnose a failed/reverted transaction hash; or INSPECT an address as an EOA,
   contract, proxy, and observable control graph. Trigger for "will this tx
   work", "why did my tx fail", "simulate this call", "what does this transaction
@@ -33,7 +33,8 @@ Invoke this skill when the user asks to:
 
 | Intent | Command |
 | --- | --- |
-| Dry-run / pre-flight a tx before signing | `simulate` |
+| Check a transaction before signing | `guard` |
+| Dry-run a call without target inspection | `simulate` |
 | Diagnose a failed / reverted tx | `autopsy` |
 | Classify an address; detect proxy/admin/upgrade authority | `inspect` |
 
@@ -50,6 +51,9 @@ Invoke this skill when the user asks to:
   flagging
   **UNLIMITED** approvals (`max uint256` / `setApprovalForAll`) before you sign.
   It **never sends a transaction**.
+- **guard** composes the same `inspect` and `simulate` cores into one report and
+  emits stable fact flags. CLI exit codes are `0` for no flags, `2` when flags
+  are present, and `1` when Shield cannot complete.
 - **autopsy** pulls the tx + receipt; if it succeeded it says so (and decodes the
   real `Transfer`/`Approval` events that occurred). For a failure it traces with
   `callTracer`, follows the root-propagated revert path, separates caught
@@ -96,7 +100,7 @@ receipt/revert-reason level and say so.
 Two equivalent paths — pick whichever is available:
 
 - **MCP tools (preferred for natural language).** If the `shield_inspect`,
-  `shield_autopsy`, `shield_simulate`, and `shield_probe` tools are present (the
+  `shield_guard`, `shield_autopsy`, `shield_simulate`, and `shield_probe` tools are present (the
   MCP server is registered), just call the one that matches the user's intent —
   no shell needed. Route by the "When to use" table above.
 - **CLI.** Otherwise run the commands from this skill's directory (after a
@@ -106,6 +110,7 @@ Two equivalent paths — pick whichever is available:
 # from the pharos-shield/ directory, after `npm install`
 npm run cli -- inspect  <address>
 npm run cli -- autopsy  <txhash>
+npm run cli -- guard --from <addr> --to <addr> [--data 0x..] [--value 1.0]
 npm run cli -- simulate --from <addr> --to <addr> [--data 0x..] [--value 1.0]
 npm run cli -- probe          # show network + live trace capability
 npm run cli -- verify-evidence evidence.json
@@ -123,7 +128,8 @@ Real verified mainnet examples and exact outputs are in the repository
 - `scripts/trace.ts` — callTracer core (`debug_traceCall` / `debug_traceTransaction`)
 - `scripts/decode.ts` — revert + calldata decoding (Error/Panic/custom)
 - `scripts/signatures.ts` — openchain signature-DB lookup + decode-confirmed naming
-- `scripts/simulate.ts`, `scripts/autopsy.ts`, `scripts/inspect.ts` — the commands
+- `scripts/guard.ts`, `scripts/simulate.ts`, `scripts/autopsy.ts`,
+  `scripts/inspect.ts` — the commands
 - `scripts/cli.ts` — CLI entrypoint
 - `mcp/server.ts` — same core exposed as MCP tools (stdio + HTTP)
 

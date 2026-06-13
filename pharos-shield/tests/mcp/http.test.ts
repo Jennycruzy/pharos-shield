@@ -57,7 +57,13 @@ test('HTTP MCP binds loopback and requires configured bearer auth', async () => 
     const tools = await client.listTools();
     assert.deepEqual(
       tools.tools.map(({ name }) => name).sort(),
-      ['shield_autopsy', 'shield_inspect', 'shield_probe', 'shield_simulate'],
+      [
+        'shield_autopsy',
+        'shield_guard',
+        'shield_inspect',
+        'shield_probe',
+        'shield_simulate',
+      ],
     );
 
     const secondClient = new Client({ name: 'second', version: '1.0.0' });

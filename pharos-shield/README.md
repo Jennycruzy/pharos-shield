@@ -18,6 +18,7 @@ Connect it to your agent and just ask; the agent routes to the right tool:
 
 | Tool | Ask | What it does |
 | --- | --- | --- |
+| `shield_guard` | "check this transaction before I sign it" | combines target inspection and exact simulation with stable fact flags |
 | `shield_inspect` | "map this proxy's controls" | slots, code hashes, owners, multisig/timelock signals, UUPS compatibility |
 | `shield_autopsy` | "why did tx `0x…` fail?" | follows the root-propagated failure and separates caught reverts |
 | `shield_simulate` | "dry-run this before I sign" | pinned pre-flight, native value intents, ERC-compatible call intents |
@@ -63,11 +64,15 @@ The same core is a CLI:
 ```bash
 npm run cli -- inspect  0x3c2269811836af69497e5f486a85d7316753cf62
 npm run cli -- autopsy  0xdeeb262fad28864a8e031db91e99de0bb4bd42aff936876d577adcddcf0de3ff
+npm run cli -- guard --from 0x… --to 0x… --data 0x…
 npm run cli -- simulate --from 0x… --to 0x… --data 0x…
 npm run cli -- probe
 npm run cli -- verify-evidence evidence.json
 # add --json for machine-readable output
 ```
+
+`guard` exit codes are `0` when the check completes with no fact flags, `2`
+when one or more flags are present, and `1` when Shield cannot complete.
 
 ## Notes
 

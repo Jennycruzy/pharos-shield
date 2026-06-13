@@ -1,7 +1,7 @@
 # Pharos Shield — agent guide
 
 Transaction & contract **integrity** layer for **Pharos mainnet (chain 1672)**.
-Three composable commands sharing one trace/RPC core. Reports only on-chain
+Four composable commands sharing one trace/RPC core. Reports only on-chain
 facts — never a SAFE/UNSAFE verdict. Not a token rug/honeypot scanner.
 
 ## Install (if asked to "install this skill")
@@ -13,6 +13,9 @@ the MCP server, and installs the skill. For a specific MCP client instead, run
 
 ## Commands
 
+- `guard` — preferred pre-sign gate: composes `inspect` and `simulate`, then
+  returns stable fact flags and exit code 0 (no flags), 2 (flags), or 1
+  (Shield could not complete). Use for "check this transaction before I sign it".
 - `simulate` — pre-flight a tx via `debug_traceCall`; reports revert/no-revert,
 	  call tree, native PROS value intents, and ERC-compatible calldata intents
 	  (flags UNLIMITED approval requests). Never sends a transaction.
@@ -39,6 +42,7 @@ Token reporting is fact-based movement/approval accounting (symbols/decimals via
 
 ```bash
 npm install
+npm run cli -- guard --from 0x<addr> --to 0x<addr> --data 0x<calldata>
 npm run cli -- inspect  0x<address>
 npm run cli -- autopsy  0x<txhash>
 npm run cli -- simulate --from 0x<addr> --to 0x<addr> --data 0x<calldata>
@@ -50,7 +54,8 @@ npm run cli -- verify-evidence evidence.json
 ## Invoke (MCP)
 
 The same core is exposed as MCP tools — see `mcp/server.ts`:
-`shield_inspect`, `shield_autopsy`, `shield_simulate`, `shield_probe`.
+`shield_guard`, `shield_inspect`, `shield_autopsy`, `shield_simulate`,
+`shield_probe`.
 
 ```bash
 npm run mcp           # stdio transport

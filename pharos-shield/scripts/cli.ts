@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * Pharos Shield CLI — simulate | autopsy | inspect.
+ * Pharos Shield CLI — guard | simulate | autopsy | inspect.
  *
  * Thin command layer over the shared core modules. Honors PHAROS_NETWORK
  * (default mainnet/1672). Supports --json for machine-readable output.
@@ -17,6 +17,7 @@ import {
 import { autopsy } from './autopsy.js';
 import { simulate, formatSimulate } from './simulate.js';
 import { inspect, formatInspect } from './inspect.js';
+import { guard, formatGuard } from './guard.js';
 import {
   createEvidenceBundle,
   formatEvidence,
@@ -63,6 +64,8 @@ Usage:
   pharos-shield autopsy  <txhash>                       Diagnose a failed tx via callTracer
   pharos-shield simulate --from <addr> --to <addr> [--data 0x..] [--value 1.0] [--gas N]
                                                         Dry-run a call (debug_traceCall). Never sends.
+  pharos-shield guard --from <addr> --to <addr> [--data 0x..] [--value 1.0] [--gas N]
+                                                        Inspect + simulate before signing.
   pharos-shield probe                                   Report network + live trace-namespace capability
   pharos-shield verify-evidence <file>                  Verify an evidence signature offline
 
@@ -202,6 +205,27 @@ async function main(): Promise<number> {
       return 0;
     }
 
+    case 'guard': {
+      const from = asString(flags.get('from'));
+      const to = asString(flags.get('to'));
+      if (!from || !to) {
+        process.stderr.write(
+          'guard requires --from <address> and --to <address>.\n',
+        );
+        return 1;
+      }
+      const params = {
+        from,
+        to,
+        ...(asString(flags.get('data')) ? { data: asString(flags.get('data'))! } : {}),
+        ...(asString(flags.get('value')) ? { value: asString(flags.get('value'))! } : {}),
+        ...(asString(flags.get('gas')) ? { gas: asString(flags.get('gas'))! } : {}),
+      };
+      const result = await guard(client, params);
+      await emit('guard', result, formatGuard(result));
+      return result.flags.length === 0 ? 0 : 2;
+    }
+
     default:
       process.stderr.write(`Unknown command: ${command}\n\n${USAGE}\n`);
       return 1;
@@ -306,7 +330,7 @@ main()
     } else {
       process.stderr.write(`Error: ${String(err)}\n`);
     }
-    process.exit(2);
+    process.exit(process.argv.slice(2).includes('guard') ? 1 : 2);
   });
 
 // Touch ethers import so tree-shakers keep it for value formatting used above.

@@ -31,7 +31,7 @@ export interface EvidenceCodeHash {
 
 export interface EvidencePayload {
   schema: typeof SCHEMA;
-  command: 'inspect' | 'autopsy' | 'simulate' | 'probe';
+  command: 'inspect' | 'autopsy' | 'simulate' | 'guard' | 'probe';
   createdAt: string;
   network: string;
   chainId: number;
