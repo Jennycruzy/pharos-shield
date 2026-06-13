@@ -792,6 +792,43 @@ language and it routes to the right tool:
 | "dry-run this call before I sign it" | `shield_simulate` |
 | "is the Pharos trace API live right now?" | `shield_probe` |
 
+### Agent consumption example: approval check mid-task
+
+**User:** "I'm about to call `approve` on this contract — check it first."
+
+The agent routes the exact proposed call through MCP:
+
+```json
+{
+  "name": "shield_guard",
+  "arguments": {
+    "from": "0x7Ac6d25FD5E437cB7c57Aee77aC2d0A6Cb85936C",
+    "to": "0x52c48d4213107b20bc583832b0d951fb9ca8f0b0",
+    "data": "0x095ea7b3000000000000000000000000bf105f4fd2f8f4c91d9a84a8d9708d23d8773f6effffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+  }
+}
+```
+
+The live result includes:
+
+```json
+{
+  "simulate": {
+    "willRevert": false
+  },
+  "flags": [
+    "unlimited_approval"
+  ]
+}
+```
+
+**Agent:** "The call would succeed at the pinned block, and its calldata
+requests an unlimited approval for
+`0xbF105F4fD2f8F4C91d9a84A8d9708d23d8773F6E`."
+
+That response reports the observed fact. It does not label the transaction
+safe or unsafe.
+
 Print ready-to-paste config for your CLI (paths resolved automatically):
 
 ```bash
