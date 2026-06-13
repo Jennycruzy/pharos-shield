@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import test from 'node:test';
-import { Wallet } from 'ethers';
+import { Interface, MaxUint256, Wallet } from 'ethers';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
@@ -13,6 +13,7 @@ import {
   verifyEvidenceBundle,
 } from '../../scripts/evidence.js';
 import { inspect } from '../../scripts/inspect.js';
+import { guard } from '../../scripts/guard.js';
 import {
   createClient,
   prepareCommand,
@@ -22,6 +23,9 @@ import { simulate } from '../../scripts/simulate.js';
 
 const live = process.env.PHAROS_LIVE_TEST === '1';
 const mainnetTest = live ? test : test.skip;
+const wpros = '0x52c48d4213107b20bc583832b0d951fb9ca8f0b0';
+const sender = '0x7Ac6d25FD5E437cB7c57Aee77aC2d0A6Cb85936C';
+const approval = new Interface(['function approve(address,uint256)']);
 
 mainnetTest('Pharos mainnet commands use real chain 1672 artifacts', async () => {
   const config = loadConfig({ ...process.env, PHAROS_NETWORK: 'mainnet' });
@@ -64,13 +68,32 @@ mainnetTest('Pharos mainnet commands use real chain 1672 artifacts', async () =>
   assert.equal(failed.revert?.reason, 'BC');
 
   const simulation = await simulate(client, {
-    from: '0x7Ac6d25FD5E437cB7c57Aee77aC2d0A6Cb85936C',
-    to: '0x52c48d4213107b20bc583832b0d951fb9ca8f0b0',
+    from: sender,
+    to: wpros,
     data:
       '0x70a082310000000000000000000000007Ac6d25FD5E437cB7c57Aee77aC2d0A6Cb85936C',
   });
   assert.equal(simulation.willRevert, false);
   assert.equal(simulation.block.blockHash.length, 66);
+
+  const cleanGuard = await guard(client, {
+    from: sender,
+    to: wpros,
+    data: '0x18160ddd',
+  });
+  assert.equal(cleanGuard.simulate.willRevert, false);
+  assert.deepEqual(cleanGuard.flags, []);
+
+  const approvalGuard = await guard(client, {
+    from: sender,
+    to: wpros,
+    data: approval.encodeFunctionData('approve', [
+      '0xbf105f4fd2f8f4c91d9a84a8d9708d23d8773f6e',
+      MaxUint256,
+    ]),
+  });
+  assert.equal(approvalGuard.simulate.willRevert, false);
+  assert.deepEqual(approvalGuard.flags, ['unlimited_approval']);
 });
 
 function assertProbeContent(result: unknown): void {
@@ -115,6 +138,32 @@ function assertSignedEvidenceContent(result: unknown): void {
   assert.match(text, /"chainId": 1672/);
 }
 
+function assertGuardContent(result: unknown): void {
+  assert.ok(result && typeof result === 'object' && 'content' in result);
+  const content = (result as { content: unknown }).content;
+  assert.ok(Array.isArray(content));
+  const text = content
+    .filter(
+      (item: unknown): item is { type: 'text'; text: string } =>
+        typeof item === 'object' &&
+        item !== null &&
+        'type' in item &&
+        item.type === 'text' &&
+        'text' in item &&
+        typeof item.text === 'string',
+    )
+    .map((item: { text: string }) => item.text)
+    .join('\n');
+  const resultObject = JSON.parse(text) as {
+    network?: unknown;
+    flags?: unknown;
+    simulate?: { willRevert?: unknown };
+  };
+  assert.equal(resultObject.network, 'mainnet');
+  assert.deepEqual(resultObject.flags, []);
+  assert.equal(resultObject.simulate?.willRevert, false);
+}
+
 async function waitForHttpServer(
   child: ReturnType<typeof spawn>,
   timeoutMs = 10_000,
@@ -134,7 +183,7 @@ async function waitForHttpServer(
   });
 }
 
-mainnetTest('both MCP transports call the live mainnet probe', async () => {
+mainnetTest('both MCP transports call live mainnet probe and guard', async () => {
   const stdioClient = new Client({ name: 'live-stdio', version: '1.0.0' });
   const stdio = new StdioClientTransport({
     command: process.execPath,
@@ -153,6 +202,12 @@ mainnetTest('both MCP transports call the live mainnet probe', async () => {
       await stdioClient.callTool({
         name: 'shield_probe',
         arguments: { includeEvidence: true },
+      }),
+    );
+    assertGuardContent(
+      await stdioClient.callTool({
+        name: 'shield_guard',
+        arguments: { from: sender, to: wpros, data: '0x18160ddd' },
       }),
     );
   } finally {
@@ -185,6 +240,12 @@ mainnetTest('both MCP transports call the live mainnet probe', async () => {
     try {
       assertProbeContent(
         await httpClient.callTool({ name: 'shield_probe', arguments: {} }),
+      );
+      assertGuardContent(
+        await httpClient.callTool({
+          name: 'shield_guard',
+          arguments: { from: sender, to: wpros, data: '0x18160ddd' },
+        }),
       );
     } finally {
       await httpClient.close();

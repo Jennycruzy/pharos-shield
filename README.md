@@ -1012,30 +1012,45 @@ Common read selectors you can paste directly: `balanceOf(address)` =
 
 ## Current build verification
 
-Re-verified **2026-06-11** against live Pharos mainnet, Node 20, ethers v6:
+Re-verified **2026-06-13** against live Pharos mainnet, Node 20, and the compiled
+`dist/` artifacts:
 
-```text
-$ npx tsc --noEmit
-tsc --noEmit: clean (exit 0)          # strict + exactOptionalPropertyTypes
+| Verification | Observed result |
+| --- | --- |
+| Locked install | 110 packages installed; npm audit found 0 vulnerabilities |
+| Strict TypeScript | `tsc --noEmit` exited 0 with `strict` and `exactOptionalPropertyTypes` |
+| Unit tests | 22/22 passed, including every guard flag extractor |
+| MCP transport tests | 3/3 passed: stdio tools, HTTP auth/session limits, non-loopback protection |
+| Production build | `tsc` emitted CLI, MCP, and all shared-core modules |
+| Package dry-run | 24 files, including LICENSE, `dist/scripts/guard.js`, and `dist/mcp/server.js` |
+| Live integration | Real chain-1672 inspect, autopsy, simulate, guard, evidence, stdio MCP, and HTTP MCP passed |
+| Mainnet probe | `network=mainnet`, `chainId=1672`, `traceCall=true`, `traceTransaction=true`, finality policy met |
 
-$ npx tsc && node dist/scripts/cli.js inspect 0x7Ac6d25FD5E437cB7c57Aee77aC2d0A6Cb85936C
-Kind:      eoa                        # compiled binary runs, not just type-checks
+The live guard matrix was also exercised directly:
 
-$ npm run cli -- probe
-Network:  mainnet (chain 1672)
-RPC:      https://rpc.pharos.xyz
-Trace:    traceCall=true traceTransaction=true
-Note:     both methods responded; traceTransaction used a real mainnet tx.
-```
+| Case | Mainnet result | Exit |
+| --- | --- | --- |
+| WPROS `totalSupply()` | no flags; would succeed | `0` |
+| WPROS `approve(spender, max uint256)` | `unlimited_approval` | `2` |
+| WPROS approval at `2^255` | `very_large_approval` | `2` |
+| `setApprovalForAll(spender, true)` calldata | `unlimited_approval`, `set_approval_for_all` | `2` |
+| One-wei native call intent | `native_value_intent` | `2` |
+| Documented EIP-1967 proxy | `upgradeable_proxy_admin_set`, plus `would_revert` for empty calldata | `2` |
+| Calldata sent to documented EOA | `target_is_eoa` | `2` |
+| Reproduction of failed tx call | `would_revert`; decoded reason `BC` | `2` |
+
+Signed guard evidence was created and verified offline with schema
+`pharos-shield-evidence/v1`, command `guard`, and chain ID `1672`. The five MCP
+tools were listed from the compiled stdio server, and `shield_guard` returned
+real mainnet data over both stdio and authenticated Streamable HTTP.
 
 Unit tests cover wrong chains, stale/outage probes, RPC quorum disagreement,
 post-command reorg detection, signed-evidence tampering, selector intent
 semantics, signature collisions, rollback accounting, propagated vs caught
-reverts, and proxy control graphs. `fast-check` property suites run randomized
-calldata, revert and proxy-slot decoder invariants. MCP transports are exercised end-to-end: `initialize` →
-`tools/list` (returns `shield_guard`, `shield_inspect`, `shield_autopsy`,
-`shield_simulate`, `shield_probe`) → `tools/call` returning real on-chain data, over **both** stdio
-and Streamable HTTP. A scheduled GitHub Actions job runs the real mainnet suite.
+reverts, proxy control graphs, and guard fact flags. `fast-check` property suites
+run randomized calldata, revert, and proxy-slot decoder invariants. The
+scheduled GitHub Actions live job now exercises clean and unlimited-approval
+guard calls plus `shield_guard` over both MCP transports.
 
 ---
 
@@ -1072,7 +1087,7 @@ each one proves:
 
 ## Verified-vs-degraded status
 
-Everything here was probed against live Pharos mainnet on 2026-06-11.
+Everything here was probed against live Pharos mainnet on 2026-06-13.
 
 | Capability | Status | Evidence |
 | --- | --- | --- |

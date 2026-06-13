@@ -90,4 +90,23 @@ when one or more flags are present, and `1` when Shield cannot complete.
 Full documentation, verified mainnet examples, and exact outputs are in the
 [repository README](https://github.com/Jennycruzy/pharos-shield#readme).
 
+## Verify the complete build
+
+The automated and live checks are explicit:
+
+```bash
+npm ci
+npm run typecheck
+npm test
+npm run build
+PHAROS_LIVE_TEST=1 npm run test:live
+node dist/scripts/cli.js probe --json
+```
+
+The live suite requires outbound RPC access and verifies chain ID `1672`,
+mainnet genesis/freshness/finality checks, inspect, autopsy, simulate, clean and
+unlimited-approval guard cases, signed evidence, and guard/probe calls over both
+stdio and HTTP MCP. Testnet is never selected unless
+`PHAROS_NETWORK=testnet` is explicitly set.
+
 MIT

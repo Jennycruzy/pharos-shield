@@ -83,7 +83,7 @@ Invoke this skill when the user asks to:
   **not** claim "verified source" (Pharos's explorer exposes no public
   source-verification API — confirmed at build time).
 
-All three share one trace/RPC core. The default mainnet RPC
+All four share one trace/RPC core. The default mainnet RPC
 (`https://rpc.pharos.xyz`) was verified to expose the `debug_*` trace namespace
 with `callTracer`. `probe` tests both trace methods independently, including a
 real mainnet transaction. If a configured RPC lacks tracing, commands degrade to
