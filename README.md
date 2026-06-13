@@ -1,15 +1,135 @@
 # Pharos Shield
 
-**A transaction-and-contract integrity layer for Pharos.** Four composable
-commands — `guard`, `simulate`, `autopsy`, `inspect` — that answer:
+Pharos Phase 2 agents will sign transactions autonomously, so they need a
+fact-based gate between intent and signature. **Pharos Shield is the pre-flight
+gate every agent can call before signing, and the forensics tool it can call
+when a transaction fails.** It inspects contract controls, simulates the exact
+call, and reports verified Pharos mainnet facts without SAFE/UNSAFE verdicts,
+risk scores, mock data, or fabricated decoding.
+
+---
+
+## One command before signing: `guard`
+
+`guard` composes target inspection and exact-call simulation into one report:
+contract or EOA, proxy implementation/admin, notable opcodes, call tree,
+decoded revert, approval intents, native value intents, and stable fact flags.
+
+```bash
+npm run cli -- guard \
+  --from 0x7Ac6d25FD5E437cB7c57Aee77aC2d0A6Cb85936C \
+  --to   0x52c48d4213107b20bc583832b0d951fb9ca8f0b0 \
+  --data 0x095ea7b3000000000000000000000000bf105f4fd2f8f4c91d9a84a8d9708d23d8773f6effffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff
+```
+
+Observed on Pharos mainnet:
+
+```text
+Simulation outcome: would succeed
+approve(address,uint256): isUnlimited=true
+Flags (facts that warrant attention)
+  unlimited_approval: The calldata requests an unlimited approval.
+Exit code: 2
+```
+
+Exit `0` means the check completed with no flags, `2` means verified fact flags
+were returned, and `1` means Shield itself could not complete. These are
+machine gates for agents, not safety verdicts.
+
+---
+
+## For judges — 90-second path
+
+Run from `pharos-shield/pharos-shield` after installation:
+
+```bash
+# 1. Prove network identity and trace support.
+npm run cli -- probe
+# -> chain 1672; traceCall=true; traceTransaction=true
+
+# 2. Explain a real failed mainnet transaction.
+npm run cli -- autopsy 0xdeeb262fad28864a8e031db91e99de0bb4bd42aff936876d577adcddcf0de3ff
+# -> status=failed; decoded revert="BC"
+
+# 3. Map a real EIP-1967 proxy and its control endpoint.
+npm run cli -- inspect 0x3c2269811836af69497e5f486a85d7316753cf62
+# -> implementation=0x4EE2...5245; admin=0x9740...d9E4
+
+# 4. Put the max-approval request through the pre-sign gate.
+npm run cli -- guard \
+  --from 0x7Ac6d25FD5E437cB7c57Aee77aC2d0A6Cb85936C \
+  --to 0x52c48d4213107b20bc583832b0d951fb9ca8f0b0 \
+  --data 0x095ea7b3000000000000000000000000bf105f4fd2f8f4c91d9a84a8d9708d23d8773f6effffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff
+# -> unlimited_approval; exit 2
+```
+
+Every expected result above was reproduced against Pharos mainnet during the
+pre-submission verification.
+
+---
+
+## Architecture
+
+```mermaid
+flowchart LR
+    A[CLI] --> C[Shared TypeScript core]
+    B[MCP tools] --> C
+    S[SKILL.md routing] --> B
+    C --> I[inspect]
+    C --> T[simulate / autopsy]
+    I --> R[Pharos RPC]
+    T --> R
+    R --> P[Pinned confirmation-depth block<br/>chain + genesis + freshness + quorum checks]
+    C --> E[Optional signed evidence<br/>result hash + code hashes + block metadata]
+```
+
+The CLI and MCP server are thin adapters over the same core. Signed evidence is
+opt-in and uses only a separate `PHAROS_EVIDENCE_SIGNING_KEY`.
+
+---
+
+## Install (one step — or just tell your agent)
+
+You do not need to run anything by hand. In Claude Code or another agent CLI
+with a shell, say:
+
+> **"Install this skill: https://github.com/Jennycruzy/pharos-shield"**
+
+The agent clones the repo and runs:
+
+```bash
+git clone https://github.com/Jennycruzy/pharos-shield
+cd pharos-shield
+bash install.sh
+```
+
+`install.sh` is idempotent and:
+
+1. `npm install` in `pharos-shield/` (this also compiles `dist/`).
+2. Registers the MCP server with Claude Code (user scope) — your
+   natural-language interface (`shield_guard/inspect/autopsy/simulate/probe`).
+3. Installs the agent skill into `~/.claude/skills/pharos-shield`.
+
+Open a **new** session (MCP tools load at startup), then just ask:
+*"is `0x3c22…cf62` a proxy and who can upgrade it?"* — the agent calls the right
+tool and answers with on-chain facts. Other CLIs: `cd pharos-shield && npm run setup`
+prints ready-to-paste config. Full details in
+[Using Shield from an AI agent (MCP)](#using-shield-from-an-ai-agent-mcp).
+
+---
+
+## Full documentation
+
+**Scope.** Pharos Shield is a transaction-and-contract integrity layer with four
+composable commands: `guard`, `simulate`, `autopsy`, and `inspect`. It answers:
 
 > *Will this transaction do what I expect, or why did it fail?*
+>
 > *What is this contract, and who controls it?*
 
-Pharos Shield operates at the **transaction-execution and contract-control
-layer**. It is **not** a token rug/honeypot/tax scanner — that is a different
-problem. Shield verifies what a transaction *does* and what a contract *is*,
-from on-chain facts only.
+It operates at the **transaction-execution and contract-control layer**. It is
+**not** a token rug/honeypot/tax scanner. Shield verifies what a transaction
+does and what a contract is from on-chain facts only.
 
 > **Honesty first.** Shield reports facts it verified ("no EIP-1967 proxy
 > detected; admin slot = 0x…; simulation would revert: INSUFFICIENT_OUTPUT").
@@ -27,41 +147,6 @@ from on-chain facts only.
   isolated deterministic test doubles for transport failures and pure decoding
   edge cases; scheduled integration tests exercise the live chain.
 
----
-
-## Install (one step — or just tell your agent)
-
-You don't need to run anything by hand. In Claude Code (or any agent CLI with a
-shell), just say:
-
-> **"Install this skill: https://github.com/Jennycruzy/pharos-shield"**
-
-The agent clones the repo and runs the installer below. It then registers the
-MCP server and installs the skill, so from your next session you talk to Shield
-in plain English — no commands.
-
-**The installer** (what the agent runs; you can run it too):
-
-```bash
-git clone https://github.com/Jennycruzy/pharos-shield
-cd pharos-shield
-bash install.sh
-```
-
-`install.sh` is idempotent and does three things:
-1. `npm install` in `pharos-shield/` (this also compiles `dist/`).
-2. Registers the MCP server with Claude Code (user scope) — your
-   natural-language interface (`shield_guard/inspect/autopsy/simulate/probe`).
-3. Installs the agent skill into `~/.claude/skills/pharos-shield`.
-
-Open a **new** session (MCP tools load at startup), then just ask:
-*"is `0x3c22…cf62` a proxy and who can upgrade it?"* — the agent calls the right
-tool and answers with on-chain facts. Other CLIs: `cd pharos-shield && npm run setup`
-prints ready-to-paste config. Full details in
-[Using Shield from an AI agent (MCP)](#using-shield-from-an-ai-agent-mcp).
-
----
-
 ## Contents
 
 1. [Why Shield exists](#why-shield-exists)
@@ -71,20 +156,21 @@ prints ready-to-paste config. Full details in
 5. [Workspace pull without clone](#workspace-pull-without-clone)
 6. [`inspect` — control structure](#inspect--control-structure)
 7. [`autopsy` — post-failure forensics](#autopsy--post-failure-forensics)
-8. [`simulate` — pre-flight dry-run](#simulate--pre-flight-dry-run)
-9. [Receipt activity & ERC-compatible call intents](#receipt-activity--erc-compatible-call-intents)
-10. [`probe` — capability check](#probe--capability-check)
-11. [RPC quorum, finality & signed evidence](#rpc-quorum-finality--signed-evidence)
-12. [Composable workflows](#composable-workflows)
-13. [Suggested demo (≈90 s)](#suggested-demo-90s)
-14. [Using Shield from an AI agent (MCP)](#using-shield-from-an-ai-agent-mcp)
-15. [Output reference (JSON fields)](#output-reference-json-fields)
-16. [Building calldata for `simulate`](#building-calldata-for-simulate)
-17. [Current build verification](#current-build-verification)
-18. [Verified on-chain artifacts](#verified-on-chain-artifacts)
-19. [Verified-vs-degraded status](#verified-vs-degraded-status)
-20. [Troubleshooting](#troubleshooting)
-21. [Configuration, safety policy, dependencies](#network-configuration)
+8. [`guard` — single pre-sign gate](#guard--single-pre-sign-gate)
+9. [`simulate` — pre-flight dry-run](#simulate--pre-flight-dry-run)
+10. [Receipt activity & ERC-compatible call intents](#receipt-activity--erc-compatible-call-intents)
+11. [`probe` — capability check](#probe--capability-check)
+12. [RPC quorum, finality & signed evidence](#rpc-quorum-finality--signed-evidence)
+13. [Composable workflows](#composable-workflows)
+14. [Suggested demo (≈90 s)](#suggested-demo-90-s)
+15. [Using Shield from an AI agent (MCP)](#using-shield-from-an-ai-agent-mcp)
+16. [Output reference (JSON fields)](#output-reference-json-fields)
+17. [Building calldata for `simulate`](#building-calldata-for-simulate)
+18. [Current build verification](#current-build-verification)
+19. [Verified on-chain artifacts](#verified-on-chain-artifacts)
+20. [Verified-vs-degraded status](#verified-vs-degraded-status)
+21. [Troubleshooting](#troubleshooting)
+22. [Configuration, safety policy, dependencies](#network-configuration)
 
 ---
 
@@ -170,10 +256,10 @@ skills.
 
 ## Skill installation (file-only)
 
-The skill is **file-only and small** — nine TypeScript modules (≈1,727 lines)
-plus the manifests, about **70 KB** tracked source (the 60 KB `package-lock.json`
-and `node_modules/` are runtime concerns, not part of the skill payload). There
-is no build step to ship: the CLI and MCP server run directly via `tsx`.
+The skill is **file-only and small**: TypeScript core modules plus the agent
+manifests. `package-lock.json` and `node_modules/` are runtime concerns, not
+part of the skill payload. There is no build step to ship: the CLI and MCP
+server run directly via `tsx`.
 
 **Natural-language prompt for an agent.** Drop this into an agent that supports
 skills and it will pull and register Shield:
@@ -648,7 +734,7 @@ npm run -s cli -- inspect "$TO" --json | jq '{kind, proxy}'
 
 ## Suggested demo (≈90 s)
 
-A four-step walkthrough that exercises all three commands against **real
+A four-step walkthrough that exercises the core workflows against **real
 mainnet** state — no setup beyond `npm install`:
 
 ```bash
@@ -778,6 +864,15 @@ JSON fields described next.
 ## Output reference (JSON fields)
 
 Use `--json` for these shapes (text mode is a formatted view of the same data).
+
+### `guard`
+
+| Field | Type | Meaning |
+| --- | --- | --- |
+| `inspect` | object | complete existing `inspect` result |
+| `simulate` | object | complete existing `simulate` result |
+| `flags` | string[] | stable fact keys that warrant attention; empty when none are present |
+| `block` | object | the simulation block anchor; each nested result retains its own verified block |
 
 ### `inspect`
 
@@ -932,8 +1027,9 @@ each one proves:
 | `0x7Ac6d25FD5E437cB7c57Aee77aC2d0A6Cb85936C` | EOA | `eth_getCode` → `0x` |
 
 > **Read-only by design.** Shield never broadcasts a transaction, so there is no
-> "write path" to verify — `simulate` uses `debug_traceCall` and the other two
-> commands are pure reads. That is a deliberate safety property, not a gap.
+> "write path" to verify — `guard` and `simulate` use `debug_traceCall`, while
+> the remaining commands are pure reads. That is a deliberate safety property,
+> not a gap.
 
 ---
 
@@ -1020,12 +1116,12 @@ Environment variables (see `.env.example`):
 3. **Mainnet is the source of truth.** Every example here is mainnet (1672).
 4. **Wrong chains are rejected.** Chain ID and mainnet genesis are checked
    before command results are labeled.
-5. **One canonical block per result.** State reads use the same quorum-checked
-   block hash, which is rechecked after analysis.
+5. **Canonical blocks are explicit.** Each underlying command result carries
+   its quorum-checked block hash, which is rechecked after analysis.
 6. **Evidence keys do not transact.** Evidence signing is opt-in and never
    broadcasts or authorizes an on-chain operation.
-7. **Pre-flight is read-only.** `simulate` uses `debug_traceCall`; it never
-   broadcasts a transaction.
+7. **Pre-flight is read-only.** `guard` and `simulate` use `debug_traceCall`;
+   neither broadcasts a transaction.
 
 ---
 
